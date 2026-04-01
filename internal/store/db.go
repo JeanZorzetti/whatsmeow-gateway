@@ -132,6 +132,26 @@ func (db *DB) ListInstances(orgID string) ([]Instance, error) {
 	return instances, nil
 }
 
+func (db *DB) ListAllInstances() ([]Instance, error) {
+	rows, err := db.SQL.Query(
+		`SELECT id, name, organization_id, COALESCE(jid,''), COALESCE(phone_number,''), status, created_at::text, updated_at::text FROM gateway_instances ORDER BY created_at`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var instances []Instance
+	for rows.Next() {
+		var inst Instance
+		if err := rows.Scan(&inst.ID, &inst.Name, &inst.OrganizationID, &inst.JID, &inst.PhoneNumber, &inst.Status, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+			return nil, err
+		}
+		instances = append(instances, inst)
+	}
+	return instances, nil
+}
+
 func (db *DB) Close() error {
 	return db.SQL.Close()
 }

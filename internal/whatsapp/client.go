@@ -471,19 +471,93 @@ func (m *Manager) SendText(instanceID string, jid types.JID, text string) (whats
 }
 
 func (m *Manager) getOrCreateDevice(id string) (*store.Device, error) {
-	devices, err := m.container.GetAllDevices(context.Background())
+	// Always create a fresh device for new instances.
+	// Existing sessions are restored via RestoreInstances at startup.
+	return m.container.NewDevice(), nil
+}
+
+// RestoreInstances loads persisted instances from the gateway DB and
+// reconnects them using existing whatsmeow sessions.
+func (m *Manager) RestoreInstances() {
+	instances, err := m.db.ListAllInstances()
 	if err != nil {
-		return nil, err
+		slog.Error("failed to list instances for restore", "error", err)
+		return
 	}
 
-	// Try to find existing device for this instance
+	devices, err := m.container.GetAllDevices(context.Background())
+	if err != nil {
+		slog.Error("failed to get devices for restore", "error", err)
+		return
+	}
+
+	if len(devices) == 0 || len(instances) == 0 {
+		return
+	}
+
+	// For single-device setups, map the first logged-in device to the first instance
+	// For multi-device, we match by stored JID
+	deviceMap := make(map[string]*store.Device)
 	for _, d := range devices {
 		if d.ID != nil {
-			return d, nil
+			deviceMap[d.ID.String()] = d
 		}
 	}
 
-	return m.container.NewDevice(), nil
+	for _, dbInst := range instances {
+		// Skip if already loaded in memory
+		if _, ok := m.clients[dbInst.ID]; ok {
+			continue
+		}
+
+		var device *store.Device
+
+		// Try to match by JID
+		if dbInst.JID != "" {
+			if d, ok := deviceMap[dbInst.JID]; ok {
+				device = d
+				delete(deviceMap, dbInst.JID) // don't reuse
+			}
+		}
+
+		// Fallback: use first available logged-in device
+		if device == nil {
+			for jid, d := range deviceMap {
+				device = d
+				delete(deviceMap, jid)
+				break
+			}
+		}
+
+		if device == nil {
+			slog.Info("no device found for instance, skipping restore", "instance", dbInst.ID, "name", dbInst.Name)
+			continue
+		}
+
+		client := whatsmeow.NewClient(device, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+
+		inst := &Instance{
+			Client:        client,
+			ID:            dbInst.ID,
+			Name:          dbInst.Name,
+			OrgID:         dbInst.OrganizationID,
+			Status:        "disconnected",
+			cancelFunc:    cancel,
+			qrSubscribers: make(map[*qrSubscriber]struct{}),
+		}
+
+		m.mu.Lock()
+		m.clients[dbInst.ID] = inst
+		m.mu.Unlock()
+
+		client.AddEventHandler(func(evt interface{}) {
+			m.handleEvent(inst, evt)
+		})
+
+		go m.connect(ctx, inst)
+		slog.Info("restored instance", "id", dbInst.ID, "name", dbInst.Name)
+	}
 }
 
 // --- Text/Media extraction helpers ---

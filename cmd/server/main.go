@@ -46,6 +46,9 @@ func main() {
 	// WhatsApp manager
 	manager := whatsapp.NewManager(db.Container, db, wh)
 
+	// Restore previously created instances (reconnect existing sessions)
+	manager.RestoreInstances()
+
 	// HTTP server
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
