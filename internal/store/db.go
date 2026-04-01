@@ -27,9 +27,12 @@ func Connect(databaseURL string) (*DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Create instance table for our gateway metadata
+	// Create tables for our gateway metadata
 	if _, err := db.Exec(instancesTableSQL); err != nil {
 		return nil, fmt.Errorf("failed to create instances table: %w", err)
+	}
+	if _, err := db.Exec(deadLetterTableSQL); err != nil {
+		return nil, fmt.Errorf("failed to create dead_letters table: %w", err)
 	}
 
 	container := sqlstore.NewWithDB(db, "postgres", nil)
@@ -51,6 +54,17 @@ CREATE TABLE IF NOT EXISTS gateway_instances (
 	status        TEXT NOT NULL DEFAULT 'disconnected',
 	created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`
+
+const deadLetterTableSQL = `
+CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+	id         BIGSERIAL PRIMARY KEY,
+	event_type TEXT NOT NULL,
+	instance_id TEXT NOT NULL,
+	payload    JSONB NOT NULL,
+	error      TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `
 
@@ -150,6 +164,24 @@ func (db *DB) ListAllInstances() ([]Instance, error) {
 		instances = append(instances, inst)
 	}
 	return instances, nil
+}
+
+// InsertDeadLetter persists a failed webhook event for later inspection/retry.
+func (db *DB) InsertDeadLetter(eventType, instanceID string, payload []byte, errMsg string) error {
+	_, err := db.SQL.Exec(
+		`INSERT INTO webhook_dead_letters (event_type, instance_id, payload, error) VALUES ($1, $2, $3, $4)`,
+		eventType, instanceID, payload, errMsg,
+	)
+	return err
+}
+
+// CountInstancesByOrg returns the number of instances for an organization.
+func (db *DB) CountInstancesByOrg(orgID string) (int, error) {
+	var count int
+	err := db.SQL.QueryRow(
+		`SELECT COUNT(*) FROM gateway_instances WHERE organization_id = $1`, orgID,
+	).Scan(&count)
+	return count, err
 }
 
 func (db *DB) Close() error {

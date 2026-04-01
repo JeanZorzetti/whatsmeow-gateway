@@ -265,6 +265,8 @@ func (m *Manager) reconnect(ctx context.Context, inst *Instance) {
 func (m *Manager) autoReconnect(ctx context.Context, inst *Instance) {
 	backoff := time.Second
 	maxBackoff := 60 * time.Second
+	maxAttempts := 30 // ~15 min of retries before alerting
+	attempts := 0
 
 	for {
 		select {
@@ -277,16 +279,53 @@ func (m *Manager) autoReconnect(ctx context.Context, inst *Instance) {
 			return
 		}
 
-		slog.Info("attempting reconnect", "instance", inst.ID, "backoff", backoff)
+		attempts++
+		slog.Info("attempting reconnect", "instance", inst.ID, "backoff", backoff, "attempt", attempts)
 		err := inst.Client.Connect()
 		if err == nil {
 			return
 		}
 
-		slog.Warn("reconnect failed", "instance", inst.ID, "error", err)
+		slog.Warn("reconnect failed", "instance", inst.ID, "error", err, "attempt", attempts)
+
+		// Alert CRM when reconnection keeps failing
+		if attempts == maxAttempts {
+			m.webhook.Send(webhook.Event{
+				Type:       "connection.alert",
+				InstanceID: inst.ID,
+				Data: map[string]any{
+					"status":         "reconnect_failed",
+					"attempts":       attempts,
+					"organizationId": inst.OrgID,
+					"message":        "Instance failed to reconnect after multiple attempts. Manual intervention may be required.",
+				},
+			})
+		}
+
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
+		}
+	}
+}
+
+// DisconnectAll gracefully disconnects all active WhatsApp clients.
+func (m *Manager) DisconnectAll() {
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.clients))
+	for id := range m.clients {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+
+	for _, id := range ids {
+		m.mu.Lock()
+		inst, ok := m.clients[id]
+		m.mu.Unlock()
+		if ok {
+			slog.Info("disconnecting instance", "id", id)
+			inst.cancelFunc()
+			inst.Client.Disconnect()
 		}
 	}
 }

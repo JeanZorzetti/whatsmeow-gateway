@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 
@@ -13,12 +14,13 @@ import (
 )
 
 type Handler struct {
-	manager *whatsapp.Manager
-	db      *store.DB
+	manager            *whatsapp.Manager
+	db                 *store.DB
+	maxInstancesPerOrg int
 }
 
-func NewHandler(manager *whatsapp.Manager, db *store.DB) *Handler {
-	return &Handler{manager: manager, db: db}
+func NewHandler(manager *whatsapp.Manager, db *store.DB, maxInstancesPerOrg int) *Handler {
+	return &Handler{manager: manager, db: db, maxInstancesPerOrg: maxInstancesPerOrg}
 }
 
 func (h *Handler) RegisterRoutes(r *gin.Engine, apiKey string) {
@@ -59,6 +61,15 @@ func (h *Handler) CreateInstance(c *gin.Context) {
 	var req CreateInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check instance limit per organization
+	count, err := h.db.CountInstancesByOrg(req.OrganizationID)
+	if err == nil && count >= h.maxInstancesPerOrg {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": fmt.Sprintf("organization already has %d instances (limit: %d)", count, h.maxInstancesPerOrg),
+		})
 		return
 	}
 

@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -43,6 +49,14 @@ func main() {
 	// Webhook client
 	wh := webhook.NewClient(cfg.CRMWebhookURL, cfg.CRMWebhookSecret)
 
+	// Dead-letter handler: persist failed webhooks to DB
+	wh.SetDeadLetterHandler(func(evt webhook.Event, lastErr error) {
+		payload, _ := json.Marshal(evt)
+		if err := db.InsertDeadLetter(evt.Type, evt.InstanceID, payload, lastErr.Error()); err != nil {
+			slog.Error("failed to insert dead letter", "error", err)
+		}
+	})
+
 	// WhatsApp manager
 	manager := whatsapp.NewManager(db.Container, db, wh)
 
@@ -54,12 +68,42 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	handler := api.NewHandler(manager, db)
+	handler := api.NewHandler(manager, db, cfg.MaxInstancesPerOrg)
 	handler.RegisterRoutes(r, cfg.APIKey)
 
-	slog.Info("server listening", "port", cfg.Port)
-	if err := r.Run(":" + cfg.Port); err != nil {
-		slog.Error("server error", "error", err)
-		os.Exit(1)
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: r,
 	}
+
+	// Start server in goroutine
+	go func() {
+		slog.Info("server listening", "port", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Graceful shutdown: wait for SIGINT/SIGTERM
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("shutting down gracefully...")
+
+	// 1. Stop accepting new HTTP requests, wait up to 15s for in-flight
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("http server shutdown error", "error", err)
+	}
+
+	// 2. Disconnect all WhatsApp clients
+	manager.DisconnectAll()
+
+	// 3. Drain webhook retry queue
+	wh.Shutdown()
+
+	slog.Info("shutdown complete")
 }
