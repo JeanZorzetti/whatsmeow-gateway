@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -354,6 +358,7 @@ func (m *Manager) handleEvent(inst *Instance, rawEvt interface{}) {
 				"state": string(evt.State),
 			},
 		})
+
 	}
 }
 
@@ -422,6 +427,33 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 }
 
 func (m *Manager) handleMessage(inst *Instance, evt *events.Message) {
+	// Handle reaction messages separately
+	if evt.Message.GetReactionMessage() != nil {
+		rm := evt.Message.GetReactionMessage()
+		reactedMsgID := ""
+		remoteJid := evt.Info.Chat.String()
+		if rm.GetKey() != nil {
+			reactedMsgID = rm.GetKey().GetID()
+			if rm.GetKey().GetRemoteJID() != "" {
+				remoteJid = rm.GetKey().GetRemoteJID()
+			}
+		}
+		m.webhook.Send(webhook.Event{
+			Type:       "reaction",
+			InstanceID: inst.ID,
+			Data: map[string]any{
+				"organizationId": inst.OrgID,
+				"remoteJid":      remoteJid,
+				"senderJid":      evt.Info.Sender.String(),
+				"messageId":      reactedMsgID,
+				"reaction":       rm.GetText(),
+				"timestamp":      evt.Info.Timestamp.Unix(),
+				"fromMe":         evt.Info.IsFromMe,
+			},
+		})
+		return
+	}
+
 	text := extractText(evt.Message)
 	mediaType := extractMediaType(evt.Message)
 
@@ -468,6 +500,123 @@ func (m *Manager) SendText(instanceID string, jid types.JID, text string) (whats
 	}
 
 	return inst.Client.SendMessage(context.Background(), jid, msg)
+}
+
+// SendMedia uploads and sends a media message.
+func (m *Manager) SendMedia(instanceID string, jid types.JID, fileBytes []byte, mimetype string, caption string, fileName string) (whatsmeow.SendResponse, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return whatsmeow.SendResponse{}, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	// Determine media type from MIME
+	var mediaType whatsmeow.MediaType
+	switch {
+	case strings.HasPrefix(mimetype, "image/"):
+		mediaType = whatsmeow.MediaImage
+	case strings.HasPrefix(mimetype, "video/"):
+		mediaType = whatsmeow.MediaVideo
+	case strings.HasPrefix(mimetype, "audio/"):
+		mediaType = whatsmeow.MediaAudio
+	default:
+		mediaType = whatsmeow.MediaDocument
+	}
+
+	resp, err := inst.Client.Upload(context.Background(), fileBytes, mediaType)
+	if err != nil {
+		return whatsmeow.SendResponse{}, fmt.Errorf("upload failed: %w", err)
+	}
+
+	var msg *waProto.Message
+	fileLen := uint64(len(fileBytes))
+
+	switch mediaType {
+	case whatsmeow.MediaImage:
+		msg = &waProto.Message{
+			ImageMessage: &waProto.ImageMessage{
+				Caption:       proto.String(caption),
+				Mimetype:      proto.String(mimetype),
+				URL:           &resp.URL,
+				DirectPath:    &resp.DirectPath,
+				MediaKey:      resp.MediaKey,
+				FileEncSHA256: resp.FileEncSHA256,
+				FileSHA256:    resp.FileSHA256,
+				FileLength:    proto.Uint64(fileLen),
+			},
+		}
+	case whatsmeow.MediaVideo:
+		msg = &waProto.Message{
+			VideoMessage: &waProto.VideoMessage{
+				Caption:       proto.String(caption),
+				Mimetype:      proto.String(mimetype),
+				URL:           &resp.URL,
+				DirectPath:    &resp.DirectPath,
+				MediaKey:      resp.MediaKey,
+				FileEncSHA256: resp.FileEncSHA256,
+				FileSHA256:    resp.FileSHA256,
+				FileLength:    proto.Uint64(fileLen),
+			},
+		}
+	case whatsmeow.MediaAudio:
+		msg = &waProto.Message{
+			AudioMessage: &waProto.AudioMessage{
+				Mimetype:      proto.String(mimetype),
+				URL:           &resp.URL,
+				DirectPath:    &resp.DirectPath,
+				MediaKey:      resp.MediaKey,
+				FileEncSHA256: resp.FileEncSHA256,
+				FileSHA256:    resp.FileSHA256,
+				FileLength:    proto.Uint64(fileLen),
+			},
+		}
+	default:
+		msg = &waProto.Message{
+			DocumentMessage: &waProto.DocumentMessage{
+				Caption:       proto.String(caption),
+				Mimetype:      proto.String(mimetype),
+				URL:           &resp.URL,
+				DirectPath:    &resp.DirectPath,
+				MediaKey:      resp.MediaKey,
+				FileEncSHA256: resp.FileEncSHA256,
+				FileSHA256:    resp.FileSHA256,
+				FileLength:    proto.Uint64(fileLen),
+				FileName:      proto.String(fileName),
+			},
+		}
+	}
+
+	return inst.Client.SendMessage(context.Background(), jid, msg)
+}
+
+// MarkRead marks messages as read.
+func (m *Manager) MarkRead(instanceID string, chat types.JID, messageIDs []types.MessageID) error {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return fmt.Errorf("instance %s not found", instanceID)
+	}
+	return inst.Client.MarkRead(context.Background(), messageIDs, time.Now(), chat, types.EmptyJID)
+}
+
+// SendReaction sends a reaction to a message.
+func (m *Manager) SendReaction(instanceID string, chat types.JID, remoteJid string, messageId string, reaction string) (whatsmeow.SendResponse, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return whatsmeow.SendResponse{}, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	msg := &waProto.Message{
+		ReactionMessage: &waProto.ReactionMessage{
+			Key: &waCommon.MessageKey{
+				RemoteJID: proto.String(remoteJid),
+				ID:        proto.String(messageId),
+				FromMe:    proto.Bool(true),
+			},
+			Text:              proto.String(reaction),
+			SenderTimestampMS: proto.Int64(time.Now().UnixMilli()),
+		},
+	}
+
+	return inst.Client.SendMessage(context.Background(), chat, msg)
 }
 
 func (m *Manager) getOrCreateDevice(id string) (*store.Device, error) {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -34,6 +35,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine, apiKey string) {
 		api.DELETE("/instances/:id", h.DeleteInstance)
 
 		api.POST("/instances/:id/messages/text", h.SendText)
+		api.POST("/instances/:id/messages/media", h.SendMedia)
+		api.POST("/instances/:id/messages/read", h.MarkRead)
+		api.POST("/instances/:id/messages/reaction", h.SendReaction)
 	}
 }
 
@@ -195,6 +199,109 @@ func (h *Handler) SendText(c *gin.Context) {
 	jid, _ := types.ParseJID(req.Number + "@s.whatsapp.net")
 
 	resp, err := h.manager.SendText(id, jid, req.Text)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"messageId": resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
+func (h *Handler) SendMedia(c *gin.Context) {
+	id := c.Param("id")
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	defer file.Close()
+
+	number := c.Request.FormValue("number")
+	if number == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "number is required"})
+		return
+	}
+
+	caption := c.Request.FormValue("caption")
+	fileName := c.Request.FormValue("fileName")
+	if fileName == "" {
+		fileName = header.Filename
+	}
+
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read file"})
+		return
+	}
+
+	mimetype := header.Header.Get("Content-Type")
+	if mimetype == "" {
+		mimetype = "application/octet-stream"
+	}
+
+	jid, _ := types.ParseJID(number + "@s.whatsapp.net")
+
+	resp, err := h.manager.SendMedia(id, jid, fileBytes, mimetype, caption, fileName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"messageId": resp.ID,
+		"timestamp": resp.Timestamp.Unix(),
+	})
+}
+
+type MarkReadRequest struct {
+	RemoteJid  string   `json:"remoteJid" binding:"required"`
+	MessageIDs []string `json:"messageIds" binding:"required"`
+}
+
+func (h *Handler) MarkRead(c *gin.Context) {
+	id := c.Param("id")
+	var req MarkReadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	chat, _ := types.ParseJID(req.RemoteJid)
+
+	msgIDs := make([]types.MessageID, len(req.MessageIDs))
+	for i, mid := range req.MessageIDs {
+		msgIDs[i] = types.MessageID(mid)
+	}
+
+	if err := h.manager.MarkRead(id, chat, msgIDs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+type SendReactionRequest struct {
+	RemoteJid string `json:"remoteJid" binding:"required"`
+	MessageId string `json:"messageId" binding:"required"`
+	Reaction  string `json:"reaction" binding:"required"`
+}
+
+func (h *Handler) SendReaction(c *gin.Context) {
+	id := c.Param("id")
+	var req SendReactionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	chat, _ := types.ParseJID(req.RemoteJid)
+
+	resp, err := h.manager.SendReaction(id, chat, req.RemoteJid, req.MessageId, req.Reaction)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
