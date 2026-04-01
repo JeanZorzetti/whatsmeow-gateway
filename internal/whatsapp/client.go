@@ -27,15 +27,78 @@ type Manager struct {
 	webhook   *webhook.Client
 }
 
+// qrSubscriber receives QR codes via a channel.
+type qrSubscriber struct {
+	ch chan string
+}
+
 // Instance wraps a whatsmeow client with gateway metadata.
 type Instance struct {
 	Client     *whatsmeow.Client
 	ID         string
 	Name       string
 	OrgID      string
-	QRChan     chan string // sends QR codes to API consumers
 	Status     string
 	cancelFunc context.CancelFunc
+
+	// QR broadcast: last QR is cached and sent to all new subscribers
+	qrMu          sync.RWMutex
+	lastQR        string
+	qrSubscribers map[*qrSubscriber]struct{}
+}
+
+// SubscribeQR returns a channel that receives QR codes.
+// The current QR (if any) is immediately sent.
+func (inst *Instance) SubscribeQR() (<-chan string, func()) {
+	sub := &qrSubscriber{ch: make(chan string, 5)}
+
+	inst.qrMu.Lock()
+	inst.qrSubscribers[sub] = struct{}{}
+	lastQR := inst.lastQR
+	inst.qrMu.Unlock()
+
+	// Send cached QR immediately
+	if lastQR != "" {
+		select {
+		case sub.ch <- lastQR:
+		default:
+		}
+	}
+
+	unsubscribe := func() {
+		inst.qrMu.Lock()
+		delete(inst.qrSubscribers, sub)
+		inst.qrMu.Unlock()
+		close(sub.ch)
+	}
+
+	return sub.ch, unsubscribe
+}
+
+// broadcastQR sends a QR code to all subscribers and caches it.
+func (inst *Instance) broadcastQR(code string) {
+	inst.qrMu.Lock()
+	inst.lastQR = code
+	subs := make([]*qrSubscriber, 0, len(inst.qrSubscribers))
+	for sub := range inst.qrSubscribers {
+		subs = append(subs, sub)
+	}
+	inst.qrMu.Unlock()
+
+	for _, sub := range subs {
+		select {
+		case sub.ch <- code:
+		default:
+			// subscriber not consuming, skip
+		}
+	}
+}
+
+// clearQR clears the cached QR and signals end to subscribers.
+func (inst *Instance) clearQR() {
+	inst.qrMu.Lock()
+	inst.lastQR = ""
+	inst.qrMu.Unlock()
 }
 
 func NewManager(container *sqlstore.Container, db *storeDB.DB, wh *webhook.Client) *Manager {
@@ -66,13 +129,13 @@ func (m *Manager) Create(id, name, orgID string) (*Instance, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	inst := &Instance{
-		Client:     client,
-		ID:         id,
-		Name:       name,
-		OrgID:      orgID,
-		QRChan:     make(chan string, 10),
-		Status:     "disconnected",
-		cancelFunc: cancel,
+		Client:        client,
+		ID:            id,
+		Name:          name,
+		OrgID:         orgID,
+		Status:        "disconnected",
+		cancelFunc:    cancel,
+		qrSubscribers: make(map[*qrSubscriber]struct{}),
 	}
 
 	m.clients[id] = inst
@@ -113,7 +176,7 @@ func (m *Manager) Remove(id string) error {
 	return nil
 }
 
-// Restart reconnects an existing instance without needing QR code.
+// Restart reconnects an existing instance, generating new QR if needed.
 func (m *Manager) Restart(id string) error {
 	m.mu.Lock()
 	inst, ok := m.clients[id]
@@ -123,7 +186,9 @@ func (m *Manager) Restart(id string) error {
 		return fmt.Errorf("instance %s not found", id)
 	}
 
+	inst.cancelFunc()
 	inst.Client.Disconnect()
+	inst.clearQR()
 	time.Sleep(time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,16 +226,22 @@ func (m *Manager) connectWithQR(ctx context.Context, inst *Instance) {
 		switch evt.Event {
 		case "code":
 			slog.Info("QR code generated", "instance", inst.ID)
-			select {
-			case inst.QRChan <- evt.Code:
-			default:
-			}
+			inst.broadcastQR(evt.Code)
 		case "success":
 			slog.Info("QR code scanned successfully", "instance", inst.ID)
+			inst.clearQR()
 			return
 		case "timeout":
-			slog.Warn("QR code timeout", "instance", inst.ID)
+			slog.Warn("QR code timeout, auto-restarting", "instance", inst.ID)
+			inst.clearQR()
 			m.setStatus(inst, "qr_timeout")
+
+			// Auto-restart for new QR after timeout
+			if ctx.Err() == nil {
+				inst.Client.Disconnect()
+				time.Sleep(2 * time.Second)
+				go m.connectWithQR(ctx, inst)
+			}
 			return
 		}
 	}

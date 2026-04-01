@@ -112,6 +112,10 @@ func (h *Handler) GetQR(c *gin.Context) {
 		return
 	}
 
+	// Subscribe to QR broadcast (gets cached QR immediately + future updates)
+	qrCh, unsub := inst.SubscribeQR()
+	defer unsub()
+
 	// SSE: stream QR codes as they arrive
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -121,7 +125,7 @@ func (h *Handler) GetQR(c *gin.Context) {
 
 	for {
 		select {
-		case code, ok := <-inst.QRChan:
+		case code, ok := <-qrCh:
 			if !ok {
 				return
 			}
