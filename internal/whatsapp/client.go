@@ -36,6 +36,16 @@ type qrSubscriber struct {
 	ch chan string
 }
 
+// SyncStats tracks history sync progress.
+type SyncStats struct {
+	mu               sync.RWMutex
+	TotalMessages    int64     `json:"totalMessages"`
+	TotalConversations int64   `json:"totalConversations"`
+	LastSyncAt       time.Time `json:"lastSyncAt,omitempty"`
+	SyncType         string    `json:"lastSyncType,omitempty"`
+	InProgress       bool      `json:"inProgress"`
+}
+
 // Instance wraps a whatsmeow client with gateway metadata.
 type Instance struct {
 	Client     *whatsmeow.Client
@@ -49,6 +59,9 @@ type Instance struct {
 	qrMu          sync.RWMutex
 	lastQR        string
 	qrSubscribers map[*qrSubscriber]struct{}
+
+	// History sync tracking
+	Sync SyncStats
 }
 
 // SubscribeQR returns a channel that receives QR codes.
@@ -161,6 +174,17 @@ func (m *Manager) Get(id string) (*Instance, bool) {
 	defer m.mu.RUnlock()
 	inst, ok := m.clients[id]
 	return inst, ok
+}
+
+// ListAll returns all in-memory instances.
+func (m *Manager) ListAll() []*Instance {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]*Instance, 0, len(m.clients))
+	for _, inst := range m.clients {
+		result = append(result, inst)
+	}
+	return result
 }
 
 // Remove disconnects and removes an instance.
@@ -408,12 +432,20 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 	}
 
 	conversations := data.GetConversations()
+	syncType := data.GetSyncType().String()
 	slog.Info("history sync received",
 		"instance", inst.ID,
-		"syncType", data.GetSyncType(),
+		"syncType", syncType,
 		"conversations", len(conversations),
 	)
 
+	inst.Sync.mu.Lock()
+	inst.Sync.InProgress = true
+	inst.Sync.SyncType = syncType
+	inst.Sync.TotalConversations += int64(len(conversations))
+	inst.Sync.mu.Unlock()
+
+	var msgCount int64
 	for _, conv := range conversations {
 		remoteJid := conv.GetID()
 		pushName := conv.GetDisplayName()
@@ -450,6 +482,8 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 			batch = append(batch, msgData)
 		}
 
+		msgCount += int64(len(batch))
+
 		if len(batch) > 0 {
 			m.webhook.Send(webhook.Event{
 				Type:       "history.sync",
@@ -463,6 +497,12 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 			})
 		}
 	}
+
+	inst.Sync.mu.Lock()
+	inst.Sync.TotalMessages += msgCount
+	inst.Sync.LastSyncAt = time.Now()
+	inst.Sync.InProgress = false
+	inst.Sync.mu.Unlock()
 }
 
 func (m *Manager) handleMessage(inst *Instance, evt *events.Message) {
@@ -763,6 +803,57 @@ func (m *Manager) GetProfilePic(instanceID string, jid types.JID) (string, error
 		return "", nil
 	}
 	return pic.URL, nil
+}
+
+// GetSyncStats returns the history sync stats for an instance.
+func (m *Manager) GetSyncStats(instanceID string) (map[string]any, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return nil, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	inst.Sync.mu.RLock()
+	defer inst.Sync.mu.RUnlock()
+
+	result := map[string]any{
+		"totalMessages":      inst.Sync.TotalMessages,
+		"totalConversations": inst.Sync.TotalConversations,
+		"lastSyncType":       inst.Sync.SyncType,
+		"inProgress":         inst.Sync.InProgress,
+	}
+	if !inst.Sync.LastSyncAt.IsZero() {
+		result["lastSyncAt"] = inst.Sync.LastSyncAt.Unix()
+	}
+	return result, nil
+}
+
+// RequestHistorySync asks WhatsApp for older messages (on-demand sync).
+func (m *Manager) RequestHistorySync(instanceID string, count int) error {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	if !inst.Client.IsConnected() {
+		return fmt.Errorf("instance %s is not connected", instanceID)
+	}
+
+	if count <= 0 {
+		count = 50
+	}
+
+	inst.Sync.mu.Lock()
+	inst.Sync.InProgress = true
+	inst.Sync.mu.Unlock()
+
+	// Request full recent history re-sync from WhatsApp
+	inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), &waProto.Message{
+		ProtocolMessage: &waProto.ProtocolMessage{
+			Type: waProto.ProtocolMessage_HISTORY_SYNC_NOTIFICATION.Enum(),
+		},
+	})
+
+	return nil
 }
 
 func (m *Manager) getOrCreateDevice(id string) (*store.Device, error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -24,9 +25,13 @@ func NewHandler(manager *whatsapp.Manager, db *store.DB, maxInstancesPerOrg int)
 }
 
 func (h *Handler) RegisterRoutes(r *gin.Engine, apiKey string) {
-	r.GET("/health", h.Health)
+	// Rate limiter: 100 requests per second per IP
+	rl := NewRateLimiter(100, time.Second)
 
-	api := r.Group("/api", AuthMiddleware(apiKey))
+	r.GET("/health", h.Health)
+	r.GET("/metrics", AuthMiddleware(apiKey), h.Metrics)
+
+	api := r.Group("/api", AuthMiddleware(apiKey), RateLimitMiddleware(rl))
 	{
 		api.POST("/instances", h.CreateInstance)
 		api.GET("/instances", h.ListInstances)
@@ -40,6 +45,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine, apiKey string) {
 		api.POST("/instances/:id/messages/media", h.SendMedia)
 		api.POST("/instances/:id/messages/read", h.MarkRead)
 		api.POST("/instances/:id/messages/reaction", h.SendReaction)
+
+		api.POST("/instances/:id/sync/request", h.RequestSync)
+		api.GET("/instances/:id/sync/status", h.GetSyncStatus)
 
 		api.GET("/instances/:id/contacts", h.GetContacts)
 		api.GET("/instances/:id/groups", h.GetGroups)
@@ -327,6 +335,35 @@ func (h *Handler) SendReaction(c *gin.Context) {
 		"messageId": resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
 	})
+}
+
+func (h *Handler) RequestSync(c *gin.Context) {
+	id := c.Param("id")
+
+	type syncReq struct {
+		Count int `json:"count"`
+	}
+	var req syncReq
+	c.ShouldBindJSON(&req)
+
+	if err := h.manager.RequestHistorySync(id, req.Count); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "sync_requested"})
+}
+
+func (h *Handler) GetSyncStatus(c *gin.Context) {
+	id := c.Param("id")
+
+	stats, err := h.manager.GetSyncStats(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
 }
 
 func (h *Handler) GetContacts(c *gin.Context) {
