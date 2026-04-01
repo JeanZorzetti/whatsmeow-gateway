@@ -38,6 +38,11 @@ func (h *Handler) RegisterRoutes(r *gin.Engine, apiKey string) {
 		api.POST("/instances/:id/messages/media", h.SendMedia)
 		api.POST("/instances/:id/messages/read", h.MarkRead)
 		api.POST("/instances/:id/messages/reaction", h.SendReaction)
+
+		api.GET("/instances/:id/contacts", h.GetContacts)
+		api.GET("/instances/:id/groups", h.GetGroups)
+		api.GET("/instances/:id/groups/:jid", h.GetGroupInfo)
+		api.GET("/instances/:id/profile-pic/:jid", h.GetProfilePic)
 	}
 }
 
@@ -311,4 +316,60 @@ func (h *Handler) SendReaction(c *gin.Context) {
 		"messageId": resp.ID,
 		"timestamp": resp.Timestamp.Unix(),
 	})
+}
+
+func (h *Handler) GetContacts(c *gin.Context) {
+	id := c.Param("id")
+	contacts, err := h.manager.GetContacts(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, contacts)
+}
+
+func (h *Handler) GetGroups(c *gin.Context) {
+	id := c.Param("id")
+	groups, err := h.manager.GetGroups(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, groups)
+}
+
+func (h *Handler) GetGroupInfo(c *gin.Context) {
+	id := c.Param("id")
+	jidStr := c.Param("jid")
+
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JID"})
+		return
+	}
+
+	info, err := h.manager.GetGroupInfo(id, jid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func (h *Handler) GetProfilePic(c *gin.Context) {
+	id := c.Param("id")
+	jidStr := c.Param("jid")
+
+	jid, err := types.ParseJID(jidStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JID"})
+		return
+	}
+
+	url, err := h.manager.GetProfilePic(id, jid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"url": url})
 }

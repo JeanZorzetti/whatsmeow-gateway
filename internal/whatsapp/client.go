@@ -619,6 +619,113 @@ func (m *Manager) SendReaction(instanceID string, chat types.JID, remoteJid stri
 	return inst.Client.SendMessage(context.Background(), chat, msg)
 }
 
+// GetContacts returns all contacts from the device store.
+func (m *Manager) GetContacts(instanceID string) ([]map[string]any, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return nil, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	contacts, err := inst.Client.Store.Contacts.GetAllContacts(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("get contacts: %w", err)
+	}
+
+	result := make([]map[string]any, 0, len(contacts))
+	for jid, info := range contacts {
+		result = append(result, map[string]any{
+			"jid":          jid.String(),
+			"phone":        jid.User,
+			"pushName":     info.PushName,
+			"businessName": info.BusinessName,
+			"fullName":     info.FullName,
+		})
+	}
+	return result, nil
+}
+
+// GetGroups returns all joined groups with metadata.
+func (m *Manager) GetGroups(instanceID string) ([]map[string]any, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return nil, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	groups, err := inst.Client.GetJoinedGroups(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("get groups: %w", err)
+	}
+
+	result := make([]map[string]any, 0, len(groups))
+	for _, g := range groups {
+		result = append(result, map[string]any{
+			"jid":          g.JID.String(),
+			"name":         g.Name,
+			"topic":        g.Topic,
+			"participants": len(g.Participants),
+			"isLocked":     g.IsLocked,
+			"isAnnounce":   g.IsAnnounce,
+		})
+	}
+	return result, nil
+}
+
+// GetGroupInfo returns detailed info for a specific group.
+func (m *Manager) GetGroupInfo(instanceID string, groupJID types.JID) (map[string]any, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return nil, fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	info, err := inst.Client.GetGroupInfo(context.Background(), groupJID)
+	if err != nil {
+		return nil, fmt.Errorf("get group info: %w", err)
+	}
+
+	participants := make([]map[string]string, 0, len(info.Participants))
+	for _, p := range info.Participants {
+		role := "member"
+		if p.IsAdmin {
+			role = "admin"
+		}
+		if p.IsSuperAdmin {
+			role = "superadmin"
+		}
+		participants = append(participants, map[string]string{
+			"jid":  p.JID.String(),
+			"role": role,
+		})
+	}
+
+	return map[string]any{
+		"jid":          info.JID.String(),
+		"name":         info.Name,
+		"topic":        info.Topic,
+		"participants": participants,
+		"isLocked":     info.IsLocked,
+		"isAnnounce":   info.IsAnnounce,
+		"owner":        info.OwnerJID.String(),
+		"created":      info.GroupCreated.Unix(),
+	}, nil
+}
+
+// GetProfilePic returns the profile picture URL for a JID.
+func (m *Manager) GetProfilePic(instanceID string, jid types.JID) (string, error) {
+	inst, ok := m.Get(instanceID)
+	if !ok {
+		return "", fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	pic, err := inst.Client.GetProfilePictureInfo(context.Background(), jid, &whatsmeow.GetProfilePictureParams{Preview: false})
+	if err != nil {
+		return "", fmt.Errorf("get profile pic: %w", err)
+	}
+	if pic == nil {
+		return "", nil
+	}
+	return pic.URL, nil
+}
+
 func (m *Manager) getOrCreateDevice(id string) (*store.Device, error) {
 	// Always create a fresh device for new instances.
 	// Existing sessions are restored via RestoreInstances at startup.
