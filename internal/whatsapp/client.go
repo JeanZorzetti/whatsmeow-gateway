@@ -18,6 +18,7 @@ import (
 	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waCompanionReg "go.mau.fi/whatsmeow/proto/waCompanionReg"
 
 	"github.com/JeanZorzetti/whatsmeow-gateway/internal/webhook"
 	storeDB "github.com/JeanZorzetti/whatsmeow-gateway/internal/store"
@@ -120,6 +121,14 @@ func (inst *Instance) clearQR() {
 }
 
 func NewManager(container *sqlstore.Container, db *storeDB.DB, wh *webhook.Client) *Manager {
+	// Request 6 months of history on initial sync (WhatsApp default is ~90 days).
+	// Must be set before any device registration.
+	fullSyncDays := uint32(180)
+	if store.DeviceProps.HistorySyncConfig == nil {
+		store.DeviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{}
+	}
+	store.DeviceProps.HistorySyncConfig.FullSyncDaysLimit = &fullSyncDays
+
 	return &Manager{
 		clients:   make(map[string]*Instance),
 		container: container,
@@ -850,20 +859,24 @@ func (m *Manager) RequestHistorySync(instanceID string, count int) error {
 		return fmt.Errorf("instance %s is not connected", instanceID)
 	}
 
-	if count <= 0 {
-		count = 50
-	}
-
 	inst.Sync.mu.Lock()
 	inst.Sync.InProgress = true
 	inst.Sync.mu.Unlock()
 
-	// Request full recent history re-sync from WhatsApp
-	inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), &waProto.Message{
+	// Trigger history re-sync by sending a self-message.
+	// The FullSyncDaysLimit=180 is configured at device registration time (clientpayload.go override),
+	// so WhatsApp will resend up to 6 months of history on reconnect.
+	_, err := inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), &waProto.Message{
 		ProtocolMessage: &waProto.ProtocolMessage{
 			Type: waProto.ProtocolMessage_HISTORY_SYNC_NOTIFICATION.Enum(),
 		},
 	})
+	if err != nil {
+		inst.Sync.mu.Lock()
+		inst.Sync.InProgress = false
+		inst.Sync.mu.Unlock()
+		return fmt.Errorf("history sync request failed: %w", err)
+	}
 
 	return nil
 }
