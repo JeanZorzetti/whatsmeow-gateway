@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -536,21 +537,32 @@ func (m *Manager) handleMessage(inst *Instance, evt *events.Message) {
 	text := extractText(evt.Message)
 	mediaType := extractMediaType(evt.Message)
 
+	data := map[string]any{
+		"organizationId": inst.OrgID,
+		"messageId":      evt.Info.ID,
+		"remoteJid":      evt.Info.Chat.String(),
+		"senderJid":      evt.Info.Sender.String(),
+		"pushName":       evt.Info.PushName,
+		"fromMe":         evt.Info.IsFromMe,
+		"timestamp":      evt.Info.Timestamp.Unix(),
+		"text":           text,
+		"mediaType":      mediaType,
+		"isGroup":        evt.Info.IsGroup,
+	}
+
+	// Download media and include as base64 data URI
+	if mediaType != "" {
+		mediaData, mimetype := downloadMediaFromMessage(inst.Client, evt.Message)
+		if mediaData != "" {
+			data["mediaBase64"] = mediaData
+			data["mediaMimetype"] = mimetype
+		}
+	}
+
 	m.webhook.Send(webhook.Event{
 		Type:       "message",
 		InstanceID: inst.ID,
-		Data: map[string]any{
-			"organizationId": inst.OrgID,
-			"messageId":      evt.Info.ID,
-			"remoteJid":      evt.Info.Chat.String(),
-			"senderJid":      evt.Info.Sender.String(),
-			"pushName":       evt.Info.PushName,
-			"fromMe":         evt.Info.IsFromMe,
-			"timestamp":      evt.Info.Timestamp.Unix(),
-			"text":           text,
-			"mediaType":      mediaType,
-			"isGroup":        evt.Info.IsGroup,
-		},
+		Data:       data,
 	})
 }
 
@@ -1014,4 +1026,49 @@ func extractMediaType(msg *waProto.Message) string {
 		return "sticker"
 	}
 	return ""
+}
+
+// downloadMediaFromMessage downloads media from a WhatsApp message and returns
+// a base64 data URI string and the mimetype. Returns empty strings on failure.
+func downloadMediaFromMessage(client *whatsmeow.Client, msg *waProto.Message) (string, string) {
+	if msg == nil || client == nil {
+		return "", ""
+	}
+
+	var downloadable whatsmeow.DownloadableMessage
+	var mimetype string
+
+	switch {
+	case msg.ImageMessage != nil:
+		downloadable = msg.ImageMessage
+		mimetype = msg.ImageMessage.GetMimetype()
+	case msg.VideoMessage != nil:
+		downloadable = msg.VideoMessage
+		mimetype = msg.VideoMessage.GetMimetype()
+	case msg.AudioMessage != nil:
+		downloadable = msg.AudioMessage
+		mimetype = msg.AudioMessage.GetMimetype()
+	case msg.DocumentMessage != nil:
+		downloadable = msg.DocumentMessage
+		mimetype = msg.DocumentMessage.GetMimetype()
+	case msg.StickerMessage != nil:
+		downloadable = msg.StickerMessage
+		mimetype = msg.StickerMessage.GetMimetype()
+	default:
+		return "", ""
+	}
+
+	if mimetype == "" {
+		mimetype = "application/octet-stream"
+	}
+
+	data, err := client.Download(context.Background(), downloadable)
+	if err != nil {
+		slog.Warn("failed to download media", "error", err)
+		return "", ""
+	}
+
+	b64 := base64.StdEncoding.EncodeToString(data)
+	dataURI := fmt.Sprintf("data:%s;base64,%s", mimetype, b64)
+	return dataURI, mimetype
 }
