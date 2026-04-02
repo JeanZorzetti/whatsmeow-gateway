@@ -23,7 +23,7 @@ func Load() *Config {
 	}
 
 	return &Config{
-		Port:               getEnv("PORT", "8090"),
+		Port:               getEnv("PORT", "8080"),
 		APIKey:             getEnv("API_KEY", ""),
 		DatabaseURL:        getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/whatsmeow?sslmode=disable"),
 		CRMWebhookURL:      getEnv("CRM_WEBHOOK_URL", ""),
