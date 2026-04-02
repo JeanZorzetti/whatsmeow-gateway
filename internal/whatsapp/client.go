@@ -977,6 +977,32 @@ func extractText(msg *waProto.Message) string {
 	if msg == nil {
 		return ""
 	}
+
+	// Unwrap DeviceSentMessage (outbound messages in history sync)
+	if msg.DeviceSentMessage != nil && msg.DeviceSentMessage.Message != nil {
+		return extractText(msg.DeviceSentMessage.Message)
+	}
+	// Unwrap EphemeralMessage (disappearing messages)
+	if msg.EphemeralMessage != nil && msg.EphemeralMessage.Message != nil {
+		return extractText(msg.EphemeralMessage.Message)
+	}
+	// Unwrap ViewOnceMessage
+	if msg.ViewOnceMessage != nil && msg.ViewOnceMessage.Message != nil {
+		return extractText(msg.ViewOnceMessage.Message)
+	}
+	// Unwrap ViewOnceMessageV2
+	if msg.ViewOnceMessageV2 != nil && msg.ViewOnceMessageV2.Message != nil {
+		return extractText(msg.ViewOnceMessageV2.Message)
+	}
+	// Unwrap DocumentWithCaptionMessage
+	if msg.DocumentWithCaptionMessage != nil && msg.DocumentWithCaptionMessage.Message != nil {
+		return extractText(msg.DocumentWithCaptionMessage.Message)
+	}
+	// Unwrap EditedMessage
+	if msg.EditedMessage != nil && msg.EditedMessage.Message != nil {
+		return extractText(msg.EditedMessage.Message)
+	}
+
 	if msg.Conversation != nil {
 		return *msg.Conversation
 	}
@@ -1016,6 +1042,15 @@ func extractText(msg *waProto.Message) string {
 	if msg.ContactMessage != nil {
 		return "[Contato]"
 	}
+	if msg.ContactsArrayMessage != nil {
+		return "[Contatos]"
+	}
+	if msg.LiveLocationMessage != nil {
+		return "[Localização ao vivo]"
+	}
+	if msg.ProtocolMessage != nil {
+		return "" // system/protocol messages have no user text
+	}
 	return ""
 }
 
@@ -1023,6 +1058,27 @@ func extractMediaType(msg *waProto.Message) string {
 	if msg == nil {
 		return ""
 	}
+
+	// Unwrap wrapper messages
+	if msg.DeviceSentMessage != nil && msg.DeviceSentMessage.Message != nil {
+		return extractMediaType(msg.DeviceSentMessage.Message)
+	}
+	if msg.EphemeralMessage != nil && msg.EphemeralMessage.Message != nil {
+		return extractMediaType(msg.EphemeralMessage.Message)
+	}
+	if msg.ViewOnceMessage != nil && msg.ViewOnceMessage.Message != nil {
+		return extractMediaType(msg.ViewOnceMessage.Message)
+	}
+	if msg.ViewOnceMessageV2 != nil && msg.ViewOnceMessageV2.Message != nil {
+		return extractMediaType(msg.ViewOnceMessageV2.Message)
+	}
+	if msg.DocumentWithCaptionMessage != nil && msg.DocumentWithCaptionMessage.Message != nil {
+		return extractMediaType(msg.DocumentWithCaptionMessage.Message)
+	}
+	if msg.EditedMessage != nil && msg.EditedMessage.Message != nil {
+		return extractMediaType(msg.EditedMessage.Message)
+	}
+
 	if msg.ImageMessage != nil {
 		return "image"
 	}
@@ -1046,6 +1102,26 @@ func extractMediaType(msg *waProto.Message) string {
 func downloadMediaFromMessage(client *whatsmeow.Client, msg *waProto.Message) (string, string) {
 	if msg == nil || client == nil {
 		return "", ""
+	}
+
+	// Unwrap wrapper messages
+	if msg.DeviceSentMessage != nil && msg.DeviceSentMessage.Message != nil {
+		return downloadMediaFromMessage(client, msg.DeviceSentMessage.Message)
+	}
+	if msg.EphemeralMessage != nil && msg.EphemeralMessage.Message != nil {
+		return downloadMediaFromMessage(client, msg.EphemeralMessage.Message)
+	}
+	if msg.ViewOnceMessage != nil && msg.ViewOnceMessage.Message != nil {
+		return downloadMediaFromMessage(client, msg.ViewOnceMessage.Message)
+	}
+	if msg.ViewOnceMessageV2 != nil && msg.ViewOnceMessageV2.Message != nil {
+		return downloadMediaFromMessage(client, msg.ViewOnceMessageV2.Message)
+	}
+	if msg.DocumentWithCaptionMessage != nil && msg.DocumentWithCaptionMessage.Message != nil {
+		return downloadMediaFromMessage(client, msg.DocumentWithCaptionMessage.Message)
+	}
+	if msg.EditedMessage != nil && msg.EditedMessage.Message != nil {
+		return downloadMediaFromMessage(client, msg.EditedMessage.Message)
 	}
 
 	var downloadable whatsmeow.DownloadableMessage
