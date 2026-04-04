@@ -1048,8 +1048,71 @@ func extractText(msg *waProto.Message) string {
 	if msg.LiveLocationMessage != nil {
 		return "[Localização ao vivo]"
 	}
+	if msg.PollCreationMessage != nil {
+		q := msg.PollCreationMessage.Name
+		if q != nil {
+			return "[Enquete] " + *q
+		}
+		return "[Enquete]"
+	}
+	if msg.PollCreationMessageV2 != nil {
+		q := msg.PollCreationMessageV2.Name
+		if q != nil {
+			return "[Enquete] " + *q
+		}
+		return "[Enquete]"
+	}
+	if msg.PollCreationMessageV3 != nil {
+		q := msg.PollCreationMessageV3.Name
+		if q != nil {
+			return "[Enquete] " + *q
+		}
+		return "[Enquete]"
+	}
+	if msg.PollUpdateMessage != nil {
+		return "[Voto em enquete]"
+	}
+	if msg.ListMessage != nil {
+		t := msg.ListMessage.Title
+		if t != nil {
+			return *t
+		}
+		d := msg.ListMessage.Description
+		if d != nil {
+			return *d
+		}
+		return "[Lista]"
+	}
+	if msg.ButtonsMessage != nil {
+		t := msg.ButtonsMessage.ContentText
+		if t != nil {
+			return *t
+		}
+		return "[Botões]"
+	}
+	if msg.TemplateMessage != nil {
+		return "[Template]"
+	}
+	if msg.GroupInviteMessage != nil {
+		return "[Convite de grupo]"
+	}
+	if msg.OrderMessage != nil {
+		return "[Pedido]"
+	}
+	if msg.ProductMessage != nil {
+		return "[Produto]"
+	}
+	if msg.ViewOnceMessageV2Extension != nil && msg.ViewOnceMessageV2Extension.Message != nil {
+		return extractText(msg.ViewOnceMessageV2Extension.Message)
+	}
 	if msg.ProtocolMessage != nil {
-		return "" // system/protocol messages have no user text
+		pType := msg.ProtocolMessage.GetType()
+		switch pType {
+		case waProto.ProtocolMessage_REVOKE:
+			return "[Mensagem apagada]"
+		default:
+			return ""
+		}
 	}
 	return ""
 }
@@ -1077,6 +1140,9 @@ func extractMediaType(msg *waProto.Message) string {
 	}
 	if msg.EditedMessage != nil && msg.EditedMessage.Message != nil {
 		return extractMediaType(msg.EditedMessage.Message)
+	}
+	if msg.ViewOnceMessageV2Extension != nil && msg.ViewOnceMessageV2Extension.Message != nil {
+		return extractMediaType(msg.ViewOnceMessageV2Extension.Message)
 	}
 
 	if msg.ImageMessage != nil {
@@ -1122,6 +1188,9 @@ func downloadMediaFromMessage(client *whatsmeow.Client, msg *waProto.Message) (s
 	}
 	if msg.EditedMessage != nil && msg.EditedMessage.Message != nil {
 		return downloadMediaFromMessage(client, msg.EditedMessage.Message)
+	}
+	if msg.ViewOnceMessageV2Extension != nil && msg.ViewOnceMessageV2Extension.Message != nil {
+		return downloadMediaFromMessage(client, msg.ViewOnceMessageV2Extension.Message)
 	}
 
 	var downloadable whatsmeow.DownloadableMessage
