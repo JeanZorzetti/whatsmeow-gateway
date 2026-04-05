@@ -31,6 +31,7 @@ type Manager struct {
 	container *sqlstore.Container
 	db        *storeDB.DB
 	webhook   *webhook.Client
+	snowflake *SnowflakeGen
 }
 
 // qrSubscriber receives QR codes via a channel.
@@ -40,12 +41,13 @@ type qrSubscriber struct {
 
 // SyncStats tracks history sync progress.
 type SyncStats struct {
-	mu               sync.RWMutex
-	TotalMessages    int64     `json:"totalMessages"`
-	TotalConversations int64   `json:"totalConversations"`
-	LastSyncAt       time.Time `json:"lastSyncAt,omitempty"`
-	SyncType         string    `json:"lastSyncType,omitempty"`
-	InProgress       bool      `json:"inProgress"`
+	mu                 sync.RWMutex
+	TotalMessages      int64     `json:"totalMessages"`
+	TotalConversations int64     `json:"totalConversations"`
+	ExpectedMessages   int       `json:"expectedMessages,omitempty"`
+	LastSyncAt         time.Time `json:"lastSyncAt,omitempty"`
+	SyncType           string    `json:"lastSyncType,omitempty"`
+	InProgress         bool      `json:"inProgress"`
 }
 
 // Instance wraps a whatsmeow client with gateway metadata.
@@ -134,6 +136,7 @@ func NewManager(container *sqlstore.Container, db *storeDB.DB, wh *webhook.Clien
 		container: container,
 		db:        db,
 		webhook:   wh,
+		snowflake: NewSnowflakeGen(1), // nodeID=1 for this gateway instance
 	}
 }
 
@@ -432,6 +435,34 @@ func (m *Manager) handleEvent(inst *Instance, rawEvt interface{}) {
 			},
 		})
 
+	case *events.OfflineSyncPreview:
+		slog.Info("offline sync preview",
+			"instance", inst.ID,
+			"messages", evt.Messages,
+			"receipts", evt.Receipts,
+			"notifications", evt.Notifications,
+		)
+		inst.Sync.mu.Lock()
+		inst.Sync.InProgress = true
+		inst.Sync.mu.Unlock()
+
+	case *events.OfflineSyncCompleted:
+		slog.Info("offline sync completed", "instance", inst.ID)
+		inst.Sync.mu.Lock()
+		inst.Sync.InProgress = false
+		inst.Sync.LastSyncAt = time.Now()
+		inst.Sync.mu.Unlock()
+
+		m.webhook.Send(webhook.Event{
+			Type:       "sync.completed",
+			InstanceID: inst.ID,
+			Data: map[string]any{
+				"organizationId":     inst.OrgID,
+				"totalMessages":      inst.Sync.TotalMessages,
+				"totalConversations": inst.Sync.TotalConversations,
+			},
+		})
+
 	}
 }
 
@@ -457,7 +488,8 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 
 	var msgCount int64
 	for _, conv := range conversations {
-		remoteJid := conv.GetID()
+		// Resolve LID in conversation JID
+		remoteJid := ResolveJIDString(inst.Client, conv.GetID())
 		pushName := conv.GetDisplayName()
 		if pushName == "" {
 			pushName = conv.GetName()
@@ -480,14 +512,18 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 				continue
 			}
 
+			msgTimestamp := wmi.GetMessageTimestamp()
+			snowflakeID := m.snowflake.GenerateFromUnixSeconds(uint64(msgTimestamp))
 			msgData := map[string]any{
-				"messageId": info.GetID(),
-				"remoteJid": remoteJid,
-				"pushName":  pushName,
-				"fromMe":    info.GetFromMe(),
-				"timestamp": wmi.GetMessageTimestamp(),
-				"text":      extractText(wmi.GetMessage()),
-				"mediaType": extractMediaType(wmi.GetMessage()),
+				"messageId":       info.GetID(),
+				"remoteJid":       remoteJid,
+				"pushName":        pushName,
+				"fromMe":          info.GetFromMe(),
+				"timestamp":       msgTimestamp,
+				"snowflakeId":     fmt.Sprintf("%d", snowflakeID),
+				"sourceTimestamp":  int64(msgTimestamp) * 1000,
+				"text":            extractText(wmi.GetMessage()),
+				"mediaType":       extractMediaType(wmi.GetMessage()),
 			}
 			batch = append(batch, msgData)
 		}
@@ -520,20 +556,21 @@ func (m *Manager) handleMessage(inst *Instance, evt *events.Message) {
 	if evt.Message.GetReactionMessage() != nil {
 		rm := evt.Message.GetReactionMessage()
 		reactedMsgID := ""
-		remoteJid := evt.Info.Chat.String()
+		remoteJid := ResolveChat(inst.Client, evt.Info.Chat)
 		if rm.GetKey() != nil {
 			reactedMsgID = rm.GetKey().GetID()
 			if rm.GetKey().GetRemoteJID() != "" {
-				remoteJid = rm.GetKey().GetRemoteJID()
+				remoteJid = ResolveJIDString(inst.Client, rm.GetKey().GetRemoteJID())
 			}
 		}
+		senderJid, _ := ResolveSender(inst.Client, evt.Info.Sender, "")
 		m.webhook.Send(webhook.Event{
 			Type:       "reaction",
 			InstanceID: inst.ID,
 			Data: map[string]any{
 				"organizationId": inst.OrgID,
 				"remoteJid":      remoteJid,
-				"senderJid":      evt.Info.Sender.String(),
+				"senderJid":      senderJid,
 				"messageId":      reactedMsgID,
 				"reaction":       rm.GetText(),
 				"timestamp":      evt.Info.Timestamp.Unix(),
@@ -546,17 +583,27 @@ func (m *Manager) handleMessage(inst *Instance, evt *events.Message) {
 	text := extractText(evt.Message)
 	mediaType := extractMediaType(evt.Message)
 
+	// Resolve LID → PN for sender and chat JIDs
+	senderJid, pushName := ResolveSender(inst.Client, evt.Info.Sender, evt.Info.PushName)
+	chatJid := ResolveChat(inst.Client, evt.Info.Chat)
+
+	// Generate time-sortable Snowflake ID from original WhatsApp timestamp
+	snowflakeID := m.snowflake.GenerateFromUnixSeconds(uint64(evt.Info.Timestamp.Unix()))
+	sourceTimestampMs := evt.Info.Timestamp.UnixMilli()
+
 	data := map[string]any{
-		"organizationId": inst.OrgID,
-		"messageId":      evt.Info.ID,
-		"remoteJid":      evt.Info.Chat.String(),
-		"senderJid":      evt.Info.Sender.String(),
-		"pushName":       evt.Info.PushName,
-		"fromMe":         evt.Info.IsFromMe,
-		"timestamp":      evt.Info.Timestamp.Unix(),
-		"text":           text,
-		"mediaType":      mediaType,
-		"isGroup":        evt.Info.IsGroup,
+		"organizationId":  inst.OrgID,
+		"messageId":       evt.Info.ID,
+		"remoteJid":       chatJid,
+		"senderJid":       senderJid,
+		"pushName":        pushName,
+		"fromMe":          evt.Info.IsFromMe,
+		"timestamp":       evt.Info.Timestamp.Unix(),
+		"snowflakeId":     fmt.Sprintf("%d", snowflakeID),
+		"sourceTimestamp":  sourceTimestampMs,
+		"text":            text,
+		"mediaType":       mediaType,
+		"isGroup":         evt.Info.IsGroup,
 	}
 
 	// Download media and include as base64 data URI
@@ -863,14 +910,12 @@ func (m *Manager) RequestHistorySync(instanceID string, count int) error {
 	inst.Sync.InProgress = true
 	inst.Sync.mu.Unlock()
 
-	// Trigger history re-sync by sending a self-message.
-	// The FullSyncDaysLimit=180 is configured at device registration time (clientpayload.go override),
-	// so WhatsApp will resend up to 6 months of history on reconnect.
-	_, err := inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), &waProto.Message{
-		ProtocolMessage: &waProto.ProtocolMessage{
-			Type: waProto.ProtocolMessage_HISTORY_SYNC_NOTIFICATION.Enum(),
-		},
-	})
+	if count <= 0 {
+		count = 500
+	}
+
+	msg := inst.Client.BuildHistorySyncRequest(nil, count)
+	_, err := inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), msg)
 	if err != nil {
 		inst.Sync.mu.Lock()
 		inst.Sync.InProgress = false
