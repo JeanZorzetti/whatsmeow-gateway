@@ -450,27 +450,14 @@ func (m *Manager) handleEvent(inst *Instance, rawEvt interface{}) {
 		inst.Sync.mu.Unlock()
 
 	case *events.OfflineSyncCompleted:
-		buffered := m.streamLen(inst.ID)
-		slog.Info("offline sync completed", "instance", inst.ID, "buffered", buffered)
+		slog.Info("offline sync completed — waiting for history blobs", "instance", inst.ID)
 		inst.Sync.mu.Lock()
-		inst.Sync.InProgress = false
 		inst.Sync.LastSyncAt = time.Now()
 		inst.Sync.mu.Unlock()
 
-		// Flush Redis buffer to CRM in batches
-		if buffered > 0 {
-			go m.flushSyncBuffer(inst)
-		}
-
-		m.webhook.Send(webhook.Event{
-			Type:       "sync.completed",
-			InstanceID: inst.ID,
-			Data: map[string]any{
-				"organizationId":     inst.OrgID,
-				"totalMessages":      inst.Sync.TotalMessages,
-				"totalConversations": inst.Sync.TotalConversations,
-			},
-		})
+		// Schedule a delayed flush: history sync blobs often arrive AFTER
+		// OfflineSyncCompleted. Wait 15s for all blobs, then flush.
+		go m.delayedFlush(inst)
 
 	}
 }
@@ -940,6 +927,20 @@ func (m *Manager) RequestHistorySync(instanceID string, count int) error {
 	}
 
 	msg := inst.Client.BuildHistorySyncRequest(nil, count)
+	if msg == nil {
+		inst.Sync.mu.Lock()
+		inst.Sync.InProgress = false
+		inst.Sync.mu.Unlock()
+		return fmt.Errorf("BuildHistorySyncRequest returned nil")
+	}
+
+	if inst.Client.Store.ID == nil {
+		inst.Sync.mu.Lock()
+		inst.Sync.InProgress = false
+		inst.Sync.mu.Unlock()
+		return fmt.Errorf("device store ID is nil — not logged in")
+	}
+
 	_, err := inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), msg)
 	if err != nil {
 		inst.Sync.mu.Lock()

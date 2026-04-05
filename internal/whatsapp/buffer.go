@@ -144,6 +144,47 @@ func (m *Manager) flushSyncBuffer(inst *Instance) {
 	)
 }
 
+// delayedFlush waits for history sync blobs to arrive (they often come AFTER
+// OfflineSyncCompleted), then flushes the Redis buffer to the CRM.
+func (m *Manager) delayedFlush(inst *Instance) {
+	// Wait 15s for history blobs to arrive
+	time.Sleep(15 * time.Second)
+
+	// Check if more blobs arrived; keep waiting if sync is still in progress
+	for i := 0; i < 12; i++ { // max 3 more minutes (12 x 15s)
+		inst.Sync.mu.RLock()
+		inProgress := inst.Sync.InProgress
+		inst.Sync.mu.RUnlock()
+
+		if !inProgress {
+			break
+		}
+		slog.Info("sync still in progress — waiting before flush", "instance", inst.ID)
+		time.Sleep(15 * time.Second)
+	}
+
+	inst.Sync.mu.Lock()
+	inst.Sync.InProgress = false
+	inst.Sync.mu.Unlock()
+
+	buffered := m.streamLen(inst.ID)
+	slog.Info("delayed flush triggered", "instance", inst.ID, "buffered", buffered)
+
+	if buffered > 0 {
+		m.flushSyncBuffer(inst)
+	}
+
+	m.webhook.Send(webhook.Event{
+		Type:       "sync.completed",
+		InstanceID: inst.ID,
+		Data: map[string]any{
+			"organizationId":     inst.OrgID,
+			"totalMessages":      inst.Sync.TotalMessages,
+			"totalConversations": inst.Sync.TotalConversations,
+		},
+	})
+}
+
 // streamLen returns the number of pending messages in the Redis Stream for an instance.
 func (m *Manager) streamLen(instanceID string) int64 {
 	if m.redis == nil {
