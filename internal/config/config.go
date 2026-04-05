@@ -10,6 +10,7 @@ type Config struct {
 	Port               string
 	APIKey             string
 	DatabaseURL        string
+	RedisURL           string
 	CRMWebhookURL      string
 	CRMWebhookSecret   string
 	LogLevel           string
@@ -26,6 +27,7 @@ func Load() *Config {
 		Port:               getEnv("PORT", "8080"),
 		APIKey:             getEnv("API_KEY", ""),
 		DatabaseURL:        getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/whatsmeow?sslmode=disable"),
+		RedisURL:           getEnv("REDIS_URL", ""),
 		CRMWebhookURL:      getEnv("CRM_WEBHOOK_URL", ""),
 		CRMWebhookSecret:   getEnv("CRM_WEBHOOK_SECRET", ""),
 		LogLevel:           strings.ToLower(getEnv("LOG_LEVEL", "info")),

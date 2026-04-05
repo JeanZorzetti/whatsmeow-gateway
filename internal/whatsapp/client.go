@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/redis/go-redis/v9"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -32,6 +33,7 @@ type Manager struct {
 	db        *storeDB.DB
 	webhook   *webhook.Client
 	snowflake *SnowflakeGen
+	redis     *redis.Client
 }
 
 // qrSubscriber receives QR codes via a channel.
@@ -122,7 +124,7 @@ func (inst *Instance) clearQR() {
 	inst.qrMu.Unlock()
 }
 
-func NewManager(container *sqlstore.Container, db *storeDB.DB, wh *webhook.Client) *Manager {
+func NewManager(container *sqlstore.Container, db *storeDB.DB, wh *webhook.Client, redisClient *redis.Client) *Manager {
 	// Request 6 months of history on initial sync (WhatsApp default is ~90 days).
 	// Must be set before any device registration.
 	fullSyncDays := uint32(180)
@@ -137,6 +139,7 @@ func NewManager(container *sqlstore.Container, db *storeDB.DB, wh *webhook.Clien
 		db:        db,
 		webhook:   wh,
 		snowflake: NewSnowflakeGen(1), // nodeID=1 for this gateway instance
+		redis:     redisClient,
 	}
 }
 
@@ -447,11 +450,17 @@ func (m *Manager) handleEvent(inst *Instance, rawEvt interface{}) {
 		inst.Sync.mu.Unlock()
 
 	case *events.OfflineSyncCompleted:
-		slog.Info("offline sync completed", "instance", inst.ID)
+		buffered := m.streamLen(inst.ID)
+		slog.Info("offline sync completed", "instance", inst.ID, "buffered", buffered)
 		inst.Sync.mu.Lock()
 		inst.Sync.InProgress = false
 		inst.Sync.LastSyncAt = time.Now()
 		inst.Sync.mu.Unlock()
+
+		// Flush Redis buffer to CRM in batches
+		if buffered > 0 {
+			go m.flushSyncBuffer(inst)
+		}
 
 		m.webhook.Send(webhook.Event{
 			Type:       "sync.completed",
@@ -531,16 +540,32 @@ func (m *Manager) handleHistorySync(inst *Instance, evt *events.HistorySync) {
 		msgCount += int64(len(batch))
 
 		if len(batch) > 0 {
-			m.webhook.Send(webhook.Event{
-				Type:       "history.sync",
-				InstanceID: inst.ID,
-				Data: map[string]any{
-					"organizationId": inst.OrgID,
-					"remoteJid":      remoteJid,
-					"pushName":       pushName,
-					"messages":       batch,
-				},
-			})
+			// Try Redis buffer first; fall back to direct webhook
+			buffered := false
+			if m.redis != nil {
+				for _, msgPayload := range batch {
+					msgPayload["organizationId"] = inst.OrgID
+					msgPayload["remoteJid"] = remoteJid
+					msgPayload["pushName"] = pushName
+					if m.pushToStream(inst.ID, msgPayload) {
+						buffered = true
+					}
+				}
+			}
+
+			if !buffered {
+				// Fallback: direct webhook (old behavior)
+				m.webhook.Send(webhook.Event{
+					Type:       "history.sync",
+					InstanceID: inst.ID,
+					Data: map[string]any{
+						"organizationId": inst.OrgID,
+						"remoteJid":      remoteJid,
+						"pushName":       pushName,
+						"messages":       batch,
+					},
+				})
+			}
 		}
 	}
 

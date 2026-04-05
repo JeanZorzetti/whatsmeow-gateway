@@ -57,8 +57,11 @@ func main() {
 		}
 	})
 
+	// Redis (optional — graceful fallback to direct webhook if unavailable)
+	redisClient := store.NewRedisClient(cfg.RedisURL)
+
 	// WhatsApp manager
-	manager := whatsapp.NewManager(db.Container, db, wh)
+	manager := whatsapp.NewManager(db.Container, db, wh, redisClient)
 
 	// Restore previously created instances (reconnect existing sessions)
 	manager.RestoreInstances()
@@ -104,6 +107,11 @@ func main() {
 
 	// 3. Drain webhook retry queue
 	wh.Shutdown()
+
+	// 4. Close Redis
+	if redisClient != nil {
+		redisClient.Close()
+	}
 
 	slog.Info("shutdown complete")
 }
