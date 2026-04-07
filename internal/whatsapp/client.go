@@ -926,19 +926,31 @@ func (m *Manager) RequestHistorySync(instanceID string, count int) error {
 		count = 500
 	}
 
-	msg := inst.Client.BuildHistorySyncRequest(nil, count)
-	if msg == nil {
-		inst.Sync.mu.Lock()
-		inst.Sync.InProgress = false
-		inst.Sync.mu.Unlock()
-		return fmt.Errorf("BuildHistorySyncRequest returned nil")
-	}
-
 	if inst.Client.Store.ID == nil {
 		inst.Sync.mu.Lock()
 		inst.Sync.InProgress = false
 		inst.Sync.mu.Unlock()
 		return fmt.Errorf("device store ID is nil — not logged in")
+	}
+
+	// BuildHistorySyncRequest panics on nil MessageInfo. We need a "last known
+	// message" anchor — use a synthetic one pointing to the user's own JID with
+	// current timestamp to request the most recent messages.
+	anchor := &types.MessageInfo{
+		MessageSource: types.MessageSource{
+			Chat:     inst.Client.Store.ID.ToNonAD(),
+			IsFromMe: true,
+		},
+		ID:        "",
+		Timestamp: time.Now(),
+	}
+
+	msg := inst.Client.BuildHistorySyncRequest(anchor, count)
+	if msg == nil {
+		inst.Sync.mu.Lock()
+		inst.Sync.InProgress = false
+		inst.Sync.mu.Unlock()
+		return fmt.Errorf("BuildHistorySyncRequest returned nil")
 	}
 
 	_, err := inst.Client.SendMessage(context.Background(), inst.Client.Store.ID.ToNonAD(), msg)
