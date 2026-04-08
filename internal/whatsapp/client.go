@@ -66,6 +66,10 @@ type Instance struct {
 	lastQR        string
 	qrSubscribers map[*qrSubscriber]struct{}
 
+	// Reconnect guard — ensures only one autoReconnect goroutine runs at a time
+	reconnectMu sync.Mutex
+	reconnecting bool
+
 	// History sync tracking
 	Sync SyncStats
 }
@@ -303,10 +307,27 @@ func (m *Manager) reconnect(ctx context.Context, inst *Instance) {
 }
 
 func (m *Manager) autoReconnect(ctx context.Context, inst *Instance) {
+	// Guard: only one autoReconnect loop per instance at a time
+	inst.reconnectMu.Lock()
+	if inst.reconnecting {
+		inst.reconnectMu.Unlock()
+		slog.Debug("autoReconnect already running — skipping", "instance", inst.ID)
+		return
+	}
+	inst.reconnecting = true
+	inst.reconnectMu.Unlock()
+
+	defer func() {
+		inst.reconnectMu.Lock()
+		inst.reconnecting = false
+		inst.reconnectMu.Unlock()
+	}()
+
 	backoff := time.Second
 	maxBackoff := 60 * time.Second
 	maxAttempts := 30 // ~15 min of retries before alerting
 	attempts := 0
+	alerted := false
 
 	for {
 		select {
@@ -316,20 +337,34 @@ func (m *Manager) autoReconnect(ctx context.Context, inst *Instance) {
 		}
 
 		if inst.Client.IsConnected() {
+			slog.Info("reconnect successful", "instance", inst.ID, "attempts", attempts)
+			m.setStatus(inst, "connected")
 			return
 		}
 
 		attempts++
 		slog.Info("attempting reconnect", "instance", inst.ID, "backoff", backoff, "attempt", attempts)
+
+		// Disconnect first to clear any stale state
+		inst.Client.Disconnect()
+
 		err := inst.Client.Connect()
-		if err == nil {
-			return
+		if err != nil {
+			slog.Warn("reconnect Connect() failed", "instance", inst.ID, "error", err, "attempt", attempts)
+		} else {
+			// Connect() is async — wait briefly and verify
+			time.Sleep(3 * time.Second)
+			if inst.Client.IsConnected() {
+				slog.Info("reconnect successful", "instance", inst.ID, "attempts", attempts)
+				m.setStatus(inst, "connected")
+				return
+			}
+			slog.Warn("reconnect Connect() returned ok but client not connected", "instance", inst.ID, "attempt", attempts)
 		}
 
-		slog.Warn("reconnect failed", "instance", inst.ID, "error", err, "attempt", attempts)
-
-		// Alert CRM when reconnection keeps failing
-		if attempts == maxAttempts {
+		// Alert CRM when reconnection keeps failing (only once)
+		if attempts == maxAttempts && !alerted {
+			alerted = true
 			m.webhook.Send(webhook.Event{
 				Type:       "connection.alert",
 				InstanceID: inst.ID,
@@ -398,8 +433,30 @@ func (m *Manager) handleEvent(inst *Instance, rawEvt interface{}) {
 		}
 
 	case *events.Disconnected:
-		slog.Warn("disconnected", "instance", inst.ID)
+		slog.Warn("disconnected — scheduling auto-reconnect", "instance", inst.ID)
 		m.setStatus(inst, "disconnected")
+		// whatsmeow's internal auto-reconnect can give up on certain errors
+		// (StreamReplaced, prolonged KeepAlive timeout, etc). Force a backoff loop.
+		go m.autoReconnect(context.Background(), inst)
+
+	case *events.StreamReplaced:
+		slog.Warn("stream replaced — another session took over, attempting reconnect", "instance", inst.ID)
+		m.setStatus(inst, "disconnected")
+		go m.autoReconnect(context.Background(), inst)
+
+	case *events.KeepAliveTimeout:
+		slog.Warn("keepalive timeout", "instance", inst.ID, "errorCount", evt.ErrorCount)
+		m.setStatus(inst, "disconnected")
+
+	case *events.KeepAliveRestored:
+		slog.Info("keepalive restored", "instance", inst.ID)
+		if inst.Client.IsConnected() {
+			m.setStatus(inst, "connected")
+		}
+
+	case *events.ClientOutdated:
+		slog.Error("client outdated — whatsmeow library needs upgrade", "instance", inst.ID)
+		m.setStatus(inst, "error")
 
 	case *events.LoggedOut:
 		slog.Warn("logged out", "instance", inst.ID, "reason", evt.Reason)
@@ -1052,6 +1109,47 @@ func (m *Manager) RestoreInstances() {
 		go m.connect(ctx, inst)
 		slog.Info("restored instance", "id", dbInst.ID, "name", dbInst.Name)
 	}
+}
+
+// StartHealthcheck runs a background loop that verifies every registered
+// instance is still connected. If an instance is found in a disconnected
+// state (e.g. container was suspended and Disconnected event was missed),
+// it triggers autoReconnect. This is the safety net for the gateway's
+// always-on WhatsApp session — independent of any CRM client activity.
+func (m *Manager) StartHealthcheck(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m.mu.RLock()
+				instances := make([]*Instance, 0, len(m.clients))
+				for _, inst := range m.clients {
+					instances = append(instances, inst)
+				}
+				m.mu.RUnlock()
+
+				for _, inst := range instances {
+					// Only attempt reconnect for instances that have a linked device
+					// and are not intentionally logged out.
+					if inst.Client == nil || inst.Client.Store.ID == nil {
+						continue
+					}
+					if inst.Status == "logged_out" || inst.Status == "banned" {
+						continue
+					}
+					if !inst.Client.IsConnected() {
+						slog.Warn("healthcheck: instance not connected — triggering reconnect",
+							"instance", inst.ID, "status", inst.Status)
+						go m.autoReconnect(context.Background(), inst)
+					}
+				}
+			}
+		}
+	}()
 }
 
 // --- Text/Media extraction helpers ---

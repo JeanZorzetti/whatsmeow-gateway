@@ -66,6 +66,13 @@ func main() {
 	// Restore previously created instances (reconnect existing sessions)
 	manager.RestoreInstances()
 
+	// Background healthcheck: verifies instances stay connected and
+	// auto-reconnects any that silently dropped (container suspend,
+	// missed Disconnected event, etc). Independent of CRM client activity.
+	healthCtx, cancelHealth := context.WithCancel(context.Background())
+	defer cancelHealth()
+	manager.StartHealthcheck(healthCtx)
+
 	// HTTP server
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
