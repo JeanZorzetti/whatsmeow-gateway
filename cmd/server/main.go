@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -38,55 +39,27 @@ func main() {
 
 	slog.Info("starting whatsmeow gateway", "port", cfg.Port)
 
-	// Database
-	db, err := store.Connect(cfg.DatabaseURL)
-	if err != nil {
-		slog.Error("failed to connect to database", "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	// Webhook client
-	wh := webhook.NewClient(cfg.CRMWebhookURL, cfg.CRMWebhookSecret)
-
-	// Dead-letter handler: persist failed webhooks to DB
-	wh.SetDeadLetterHandler(func(evt webhook.Event, lastErr error) {
-		payload, _ := json.Marshal(evt)
-		if err := db.InsertDeadLetter(evt.Type, evt.InstanceID, payload, lastErr.Error()); err != nil {
-			slog.Error("failed to insert dead letter", "error", err)
-		}
-	})
-
-	// Redis (optional — graceful fallback to direct webhook if unavailable)
-	redisClient := store.NewRedisClient(cfg.RedisURL)
-
-	// WhatsApp manager
-	manager := whatsapp.NewManager(db.Container, db, wh, redisClient)
-
-	// Restore previously created instances (reconnect existing sessions)
-	manager.RestoreInstances()
-
-	// Background healthcheck: verifies instances stay connected and
-	// auto-reconnects any that silently dropped (container suspend,
-	// missed Disconnected event, etc). Independent of CRM client activity.
-	healthCtx, cancelHealth := context.WithCancel(context.Background())
-	defer cancelHealth()
-	manager.StartHealthcheck(healthCtx)
-
-	// HTTP server
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
-	handler := api.NewHandler(manager, db, cfg.MaxInstancesPerOrg)
-	handler.RegisterRoutes(r, cfg.APIKey)
+	// ── Startup health probe ────────────────────────────────────────────────
+	// The HTTP server binds the port immediately so EasyPanel's health check
+	// never kills the process while DB / WhatsApp sessions are still loading.
+	// Once ready, /health returns "ok"; until then it returns "starting" (still 200).
+	var ready atomic.Bool
+	r.GET("/health", func(c *gin.Context) {
+		if ready.Load() {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		} else {
+			c.JSON(http.StatusOK, gin.H{"status": "starting"})
+		}
+	})
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: r,
 	}
-
-	// Start server in goroutine
 	go func() {
 		slog.Info("server listening", "port", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -95,27 +68,54 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown: wait for SIGINT/SIGTERM
+	// ── Heavy initialisation (DB + Redis + WhatsApp) ───────────────────────
+	db, err := store.Connect(cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	wh := webhook.NewClient(cfg.CRMWebhookURL, cfg.CRMWebhookSecret)
+	wh.SetDeadLetterHandler(func(evt webhook.Event, lastErr error) {
+		payload, _ := json.Marshal(evt)
+		if err := db.InsertDeadLetter(evt.Type, evt.InstanceID, payload, lastErr.Error()); err != nil {
+			slog.Error("failed to insert dead letter", "error", err)
+		}
+	})
+
+	redisClient := store.NewRedisClient(cfg.RedisURL)
+
+	manager := whatsapp.NewManager(db.Container, db, wh, redisClient)
+	manager.RestoreInstances()
+
+	healthCtx, cancelHealth := context.WithCancel(context.Background())
+	defer cancelHealth()
+	manager.StartHealthcheck(healthCtx)
+
+	// ── Register full routes and mark ready ───────────────────────────────
+	handler := api.NewHandler(manager, db, cfg.MaxInstancesPerOrg)
+	handler.RegisterRoutes(r, cfg.APIKey)
+	ready.Store(true)
+
+	slog.Info("gateway ready")
+
+	// ── Graceful shutdown: wait for SIGINT/SIGTERM ─────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	slog.Info("shutting down gracefully...")
 
-	// 1. Stop accepting new HTTP requests, wait up to 15s for in-flight
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("http server shutdown error", "error", err)
 	}
 
-	// 2. Disconnect all WhatsApp clients
 	manager.DisconnectAll()
-
-	// 3. Drain webhook retry queue
 	wh.Shutdown()
 
-	// 4. Close Redis
 	if redisClient != nil {
 		redisClient.Close()
 	}
