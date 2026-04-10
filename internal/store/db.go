@@ -38,9 +38,19 @@ func Connect(databaseURL string) (*DB, error) {
 	if _, err := db.Exec(instancesTableSQL); err != nil {
 		return nil, fmt.Errorf("failed to create instances table: %w", err)
 	}
+	slog.Info("gateway_instances table ensured")
+
 	if _, err := db.Exec(deadLetterTableSQL); err != nil {
 		return nil, fmt.Errorf("failed to create dead_letters table: %w", err)
 	}
+
+	// Verify the table actually exists (sanity check)
+	var tableExists bool
+	err = db.QueryRow(`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'gateway_instances')`).Scan(&tableExists)
+	if err != nil || !tableExists {
+		return nil, fmt.Errorf("gateway_instances table verification failed: exists=%v err=%v", tableExists, err)
+	}
+	slog.Info("gateway_instances table verified in public schema")
 
 	container := sqlstore.NewWithDB(db, "postgres", nil)
 	if err := container.Upgrade(context.Background()); err != nil {
