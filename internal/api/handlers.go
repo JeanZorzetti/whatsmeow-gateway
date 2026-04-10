@@ -28,7 +28,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine, apiKey string) {
 	// Rate limiter: 100 requests per second per IP
 	rl := NewRateLimiter(100, time.Second)
 
-	r.GET("/health", h.Health)
 	r.GET("/metrics", AuthMiddleware(apiKey), h.Metrics)
 
 	api := r.Group("/api", AuthMiddleware(apiKey), RateLimitMiddleware(rl))
