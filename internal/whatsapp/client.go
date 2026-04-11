@@ -1038,14 +1038,21 @@ func (m *Manager) RestoreInstances() {
 		slog.Error("failed to list instances for restore", "error", err)
 		return
 	}
+	slog.Info("restore: gateway_instances found", "count", len(instances))
 
 	devices, err := m.container.GetAllDevices(context.Background())
 	if err != nil {
 		slog.Error("failed to get devices for restore", "error", err)
 		return
 	}
+	slog.Info("restore: whatsmeow devices found", "count", len(devices))
 
-	if len(devices) == 0 || len(instances) == 0 {
+	if len(devices) == 0 {
+		slog.Warn("restore: no whatsmeow devices in DB — session was lost, QR scan required")
+		return
+	}
+	if len(instances) == 0 {
+		slog.Warn("restore: no gateway_instances in DB — nothing to restore")
 		return
 	}
 
