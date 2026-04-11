@@ -101,9 +101,20 @@ func main() {
 	slog.Info("gateway ready")
 
 	// ── Graceful shutdown: wait for SIGINT/SIGTERM ─────────────────────────
+	// Note: ignore signals for the first 10s after ready — EasyPanel sometimes
+	// sends a SIGTERM to the previous container but it can race with the new one.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+
+	startupDeadline := time.Now().Add(10 * time.Second)
+	for {
+		sig := <-quit
+		if time.Now().After(startupDeadline) {
+			slog.Info("received signal, shutting down", "signal", sig)
+			break
+		}
+		slog.Warn("ignoring signal during startup grace period", "signal", sig, "remaining_ms", time.Until(startupDeadline).Milliseconds())
+	}
 
 	slog.Info("shutting down gracefully...")
 
