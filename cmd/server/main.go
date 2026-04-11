@@ -22,6 +22,13 @@ import (
 )
 
 func main() {
+	// Register signal handler FIRST — before any init — so we never miss a SIGTERM.
+	// EasyPanel sends SIGTERM ~3s into startup during rolling deploys; buffered
+	// channel ensures the signal is queued even if we haven't reached the wait yet.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	startupTime := time.Now()
+
 	godotenv.Load()
 	cfg := config.Load()
 
@@ -100,20 +107,19 @@ func main() {
 
 	slog.Info("gateway ready")
 
-	// ── Graceful shutdown: wait for SIGINT/SIGTERM ─────────────────────────
-	// Note: ignore signals for the first 10s after ready — EasyPanel sometimes
-	// sends a SIGTERM to the previous container but it can race with the new one.
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
-	startupDeadline := time.Now().Add(10 * time.Second)
+	// ── Graceful shutdown: drain signals, ignore any that arrived within
+	// the first 15s of startup (EasyPanel rolling-deploy race condition).
+	const gracePeriod = 15 * time.Second
 	for {
 		sig := <-quit
-		if time.Now().After(startupDeadline) {
+		elapsed := time.Since(startupTime)
+		if elapsed >= gracePeriod {
 			slog.Info("received signal, shutting down", "signal", sig)
 			break
 		}
-		slog.Warn("ignoring signal during startup grace period", "signal", sig, "remaining_ms", time.Until(startupDeadline).Milliseconds())
+		slog.Warn("ignoring signal during startup grace period", "signal", sig,
+			"elapsed_ms", elapsed.Milliseconds(),
+			"grace_ms", gracePeriod.Milliseconds())
 	}
 
 	slog.Info("shutting down gracefully...")
