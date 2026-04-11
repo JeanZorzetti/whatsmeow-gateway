@@ -296,6 +296,7 @@ func (m *Manager) connectWithQR(ctx context.Context, inst *Instance) {
 }
 
 func (m *Manager) reconnect(ctx context.Context, inst *Instance) {
+	slog.Info("reconnecting instance", "instance", inst.ID, "jid", inst.Client.Store.ID)
 	err := inst.Client.Connect()
 	if err != nil {
 		slog.Error("failed to reconnect", "instance", inst.ID, "error", err)
@@ -303,7 +304,9 @@ func (m *Manager) reconnect(ctx context.Context, inst *Instance) {
 
 		// Auto-reconnect with backoff
 		go m.autoReconnect(ctx, inst)
+		return
 	}
+	slog.Info("reconnect Connect() called — waiting for Connected event", "instance", inst.ID)
 }
 
 func (m *Manager) autoReconnect(ctx context.Context, inst *Instance) {

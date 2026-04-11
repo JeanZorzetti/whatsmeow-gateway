@@ -107,21 +107,10 @@ func main() {
 
 	slog.Info("gateway ready")
 
-	// ── Graceful shutdown: drain signals, ignore any that arrived within
-	// the first 15s of startup (EasyPanel rolling-deploy race condition).
-	const gracePeriod = 15 * time.Second
-	for {
-		sig := <-quit
-		elapsed := time.Since(startupTime)
-		slog.Info("signal received", "signal", sig, "elapsed_ms", elapsed.Milliseconds(), "grace_ms", gracePeriod.Milliseconds())
-		if elapsed >= gracePeriod {
-			slog.Info("shutting down gracefully...")
-			break
-		}
-		slog.Warn("ignoring early signal — still in grace period", "signal", sig,
-			"elapsed_ms", elapsed.Milliseconds(),
-			"grace_ms", gracePeriod.Milliseconds())
-	}
+	// ── Graceful shutdown: wait for SIGINT/SIGTERM ─────────────────────────
+	sig := <-quit
+	elapsed := time.Since(startupTime)
+	slog.Info("signal received — shutting down", "signal", sig, "uptime_ms", elapsed.Milliseconds())
 
 	slog.Info("shutting down gracefully...")
 
