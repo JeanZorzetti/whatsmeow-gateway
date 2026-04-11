@@ -67,7 +67,19 @@ func Connect(databaseURL string) (*DB, error) {
 		return nil, fmt.Errorf("failed to upgrade whatsmeow store: %w", err)
 	}
 
-	slog.Info("database connected and whatsmeow store initialized")
+	// Verify whatsmeow tables were actually created
+	var wmTables []string
+	rows, err := db.Query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'whatsmeow%' ORDER BY tablename`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var t string
+			if rows.Scan(&t) == nil {
+				wmTables = append(wmTables, t)
+			}
+		}
+	}
+	slog.Info("database connected and whatsmeow store initialized", "whatsmeow_tables", wmTables)
 	return &DB{SQL: db, Container: container}, nil
 }
 
