@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -19,6 +20,15 @@ type DB struct {
 
 // Connect opens a PostgreSQL connection and initializes the whatsmeow device store.
 func Connect(databaseURL string) (*DB, error) {
+	// Log host+db for diagnosis (redact password)
+	safeURL := databaseURL
+	if i := strings.Index(databaseURL, ":"); i >= 0 {
+		if j := strings.Index(databaseURL[i+1:], "@"); j >= 0 {
+			safeURL = databaseURL[:i+1] + "***" + databaseURL[i+1+j:]
+		}
+	}
+	slog.Info("connecting to database", "url", safeURL)
+
 	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
