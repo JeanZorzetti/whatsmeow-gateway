@@ -23,9 +23,9 @@ import (
 
 func main() {
 	// Register signal handler FIRST — before any init — so we never miss a SIGTERM.
-	// EasyPanel sends SIGTERM ~3s into startup during rolling deploys; buffered
-	// channel ensures the signal is queued even if we haven't reached the wait yet.
-	quit := make(chan os.Signal, 1)
+	// Buffer of 10 prevents the Go runtime from falling back to default handler
+	// when EasyPanel sends bursts of SIGTERMs during rolling deploys.
+	quit := make(chan os.Signal, 10)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	startupTime := time.Now()
 
@@ -113,11 +113,12 @@ func main() {
 	for {
 		sig := <-quit
 		elapsed := time.Since(startupTime)
+		slog.Info("signal received", "signal", sig, "elapsed_ms", elapsed.Milliseconds(), "grace_ms", gracePeriod.Milliseconds())
 		if elapsed >= gracePeriod {
-			slog.Info("received signal, shutting down", "signal", sig)
+			slog.Info("shutting down gracefully...")
 			break
 		}
-		slog.Warn("ignoring signal during startup grace period", "signal", sig,
+		slog.Warn("ignoring early signal — still in grace period", "signal", sig,
 			"elapsed_ms", elapsed.Milliseconds(),
 			"grace_ms", gracePeriod.Milliseconds())
 	}
