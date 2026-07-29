@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whatsmeow-gateway — várias contas de WhatsApp atrás de uma API</title>
+<meta name="description" content="Gateway em Go sobre a whatsmeow: várias instâncias de WhatsApp por organização, pareamento por QR, envio de texto e mídia, sincronização de contatos e grupos, e webhook assinado com HMAC para o CRM.">
+<meta property="og:title" content="whatsmeow-gateway — várias contas de WhatsApp atrás de uma API">
+<meta property="og:description" content="Um binário Go, várias instâncias pareadas, um webhook assinado. Sem navegador headless, sem sessão única.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#E4E7E6">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23E4E7E6'/><rect x='5' y='7' width='22' height='5' fill='%236B3FA0'/><rect x='5' y='14' width='22' height='5' fill='%236B3FA0' opacity='.6'/><rect x='5' y='21' width='22' height='5' fill='%236B3FA0' opacity='.3'/></svg>">
+<style>
+  :root{
+    --ground:#E4E7E6; --panel:#EDEFEE; --ink:#12171A; --muted:#69747A;
+    --rule:#C9CFCD; --signal:#6B3FA0; --ok:#1F6F5C; --warn:#A96A11; --dim:#8C949A;
+    --mono:ui-monospace,"Cascadia Mono","SF Mono","Roboto Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,"Segoe UI",Inter,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.6}
+  a{color:inherit}
+  :focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+
+  .strip{border-bottom:1px solid var(--ink);background:var(--ground);position:sticky;top:0;z-index:10}
+  .strip .wrap{display:flex;flex-wrap:wrap;gap:0 28px;align-items:baseline;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;padding:10px 24px}
+  .strip b{font-weight:700;letter-spacing:.1em}
+  .strip span{color:var(--muted)}
+  .strip span i{font-style:normal;color:var(--ink)}
+  .live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--signal);margin-right:7px;vertical-align:middle;animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  .hero{padding:88px 0 24px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--signal);margin:0 0 22px}
+  h1{font-family:var(--mono);font-weight:500;font-size:clamp(2.4rem,7vw,5.2rem);line-height:.96;letter-spacing:-.045em;margin:0 0 26px;max-width:16ch}
+  h1 em{font-style:normal;color:var(--signal)}
+  .lede{font-size:clamp(1.05rem,2.1vw,1.3rem);max-width:58ch;margin:0 0 14px;color:#2B3336}
+  .sub{max-width:58ch;color:var(--muted);margin:0}
+  code{font-family:var(--mono);font-size:.9em;background:#DADEDD;padding:1px 5px}
+
+  /* ── assinatura: o rack de instâncias ── */
+  .rack{margin:56px 0 0;border:1px solid var(--ink);background:var(--panel)}
+  .rack-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--ink);font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .rack-head em{font-style:normal;color:var(--muted)}
+  .inst{display:grid;grid-template-columns:150px 128px 1fr 96px;gap:16px;align-items:center;padding:13px 18px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:12.5px}
+  .inst:last-of-type{border-bottom:0}
+  .inst .id{font-weight:600;letter-spacing:-.01em}
+  .inst .id u{display:block;text-decoration:none;font-weight:400;font-size:11px;color:var(--muted);letter-spacing:.04em}
+  .st{letter-spacing:.1em;text-transform:uppercase;font-size:11px}
+  .st[data-s="qr"]{color:var(--warn)}
+  .st[data-s="conectando"]{color:var(--warn)}
+  .st[data-s="sincronizando"]{color:var(--signal)}
+  .st[data-s="online"]{color:var(--ok)}
+  .wire{height:8px;background:#D7DBDA;position:relative;overflow:hidden}
+  .wire i{position:absolute;top:0;bottom:0;width:26px;background:var(--signal);opacity:.85;animation:slide 1.9s linear infinite}
+  .inst[data-idle="1"] .wire i{display:none}
+  @keyframes slide{from{left:-26px}to{left:100%}}
+  .cnt{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  .cnt b{color:var(--ink);font-weight:600}
+  .rack-foot{padding:11px 18px;border-top:1px solid var(--ink);font-family:var(--mono);font-size:11px;color:var(--muted);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .rack-foot i{font-style:normal;color:var(--ink)}
+
+  section{padding:76px 0 4px}
+  h2{font-family:var(--mono);font-weight:500;font-size:clamp(1.5rem,3.4vw,2.1rem);letter-spacing:-.02em;margin:0 0 8px}
+  .kicker{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+  .say{max-width:64ch;margin:0 0 34px}
+  .say strong{font-weight:600}
+
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:11px 12px 11px 0;border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:500;border-bottom-color:var(--ink)}
+  td code{background:none;padding:0;font-size:13px}
+  .verb{font-family:var(--mono);font-size:11px;letter-spacing:.08em;padding:1px 6px;border:1px solid var(--rule)}
+
+  ol.life{list-style:none;margin:0;padding:0;border-top:1px solid var(--ink);counter-reset:s}
+  ol.life li{display:grid;grid-template-columns:52px 1fr;gap:20px;padding:16px 0;border-bottom:1px solid var(--rule)}
+  ol.life li::before{counter-increment:s;content:counter(s,decimal-leading-zero);font-family:var(--mono);font-size:12px;color:var(--signal);letter-spacing:.06em;padding-top:2px}
+  ol.life h3{margin:0 0 4px;font-size:15px;font-weight:600}
+  ol.life p{margin:0;font-size:14px;color:var(--muted);line-height:1.5}
+
+  .traps{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--ink);border:1px solid var(--ink)}
+  .trap{background:var(--panel);padding:22px 20px}
+  .trap h3{margin:0 0 8px;font-family:var(--mono);font-size:14px;font-weight:600}
+  .trap p{margin:0;font-size:13.5px;color:var(--muted);line-height:1.55}
+  .trap p+p{margin-top:10px;color:#2B3336}
+
+  pre{font-family:var(--mono);font-size:13px;line-height:1.75;margin:0;padding:20px;border:1px solid var(--ink);background:var(--panel);overflow-x:auto}
+  .c{color:var(--muted)}
+  .k{color:var(--signal)}
+  .cta{display:inline-block;margin-top:28px;font-family:var(--mono);font-size:13px;letter-spacing:.06em;text-transform:uppercase;text-decoration:none;border:1px solid var(--ink);padding:13px 22px;background:var(--ink);color:var(--ground)}
+  .cta:hover{background:var(--signal);border-color:var(--signal)}
+
+  footer{margin-top:84px;border-top:1px solid var(--ink);padding:22px 0 60px}
+  footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;color:var(--muted)}
+  footer a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--rule)}
+  footer a:hover{border-bottom-color:var(--signal);color:var(--signal)}
+
+  @media (max-width:820px){
+    .traps{grid-template-columns:1fr}
+    .inst{grid-template-columns:1fr 96px;row-gap:6px}
+    .inst .wire{grid-column:1/-1}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="strip">
+  <div class="wrap">
+    <b>whatsmeow-gateway</b>
+    <span class="live"><i>multi-instância</i></span>
+    <span>runtime <i>Go, 1 binário</i></span>
+    <span>navegador headless <i>nenhum</i></span>
+    <span>webhook <i>HMAC</i></span>
+    <span>ROI&nbsp;Labs</span>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Gateway de WhatsApp sobre a whatsmeow</p>
+    <h1>Várias contas, <em>uma API</em>.</h1>
+    <p class="lede">
+      Cada cliente do CRM tem o próprio número pareado. O gateway segura todas as sessões no mesmo
+      processo e entrega uma API HTTP igual para todas.
+    </p>
+    <p class="sub">
+      Sem Chrome headless segurando uma aba por conta, sem sessão única que derruba todo mundo quando
+      cai. É a biblioteca <code>whatsmeow</code> falando o protocolo multi-device direto, num binário
+      Go que sobe em qualquer lugar.
+    </p>
+
+    <div class="rack">
+      <div class="rack-head">
+        <span>Instâncias · organização <em>roilabs</em></span>
+        <em id="cap">limite por org · 5</em>
+      </div>
+      <div id="rows"></div>
+      <div class="rack-foot">
+        <span>Todo evento recebido vira um POST assinado para o CRM.</span>
+        <span id="tally">eventos entregues: 0</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Ciclo de vida</p>
+    <h2>Do QR ao primeiro evento</h2>
+    <p class="say">
+      Uma instância é criada vazia e sobe sozinha até ficar utilizável. Cada estado é consultável em
+      <code>GET /instances/:id/status</code>, então quem chama nunca precisa adivinhar.
+    </p>
+    <ol class="life">
+      <li><div>
+        <h3>Criada</h3>
+        <p><code>POST /instances</code> reserva a instância e checa o teto por organização antes de alocar qualquer coisa.</p>
+      </div></li>
+      <li><div>
+        <h3>QR disponível</h3>
+        <p><code>GET /instances/:id/qr</code> devolve o código a ser lido no celular. O par é feito uma vez; a sessão persiste no Postgres.</p>
+      </div></li>
+      <li><div>
+        <h3>Sincronizando</h3>
+        <p>Contatos e grupos entram em segundo plano. <code>GET /sync/status</code> mostra o progresso em vez de deixar a chamada pendurada.</p>
+      </div></li>
+      <li><div>
+        <h3>Online</h3>
+        <p>A instância envia, recebe e reage. Se cair, <code>POST /instances/:id/restart</code> reconecta sem novo pareamento.</p>
+      </div></li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">API</p>
+    <h2>O que dá para fazer com uma instância</h2>
+    <p class="say">
+      Tudo passa por uma API key no header. As rotas de instância são as mesmas para uma conta ou
+      para cinquenta.
+    </p>
+    <table>
+      <thead><tr><th>Rota</th><th>Método</th><th>Para quê</th></tr></thead>
+      <tbody>
+        <tr><td><code>/instances</code></td><td><span class="verb">POST</span></td><td>Cria uma instância, respeitando o teto da organização.</td></tr>
+        <tr><td><code>/instances/:id/qr</code></td><td><span class="verb">GET</span></td><td>QR de pareamento.</td></tr>
+        <tr><td><code>/instances/:id/status</code></td><td><span class="verb">GET</span></td><td>Estado da conexão, sem adivinhação.</td></tr>
+        <tr><td><code>/messages/text</code></td><td><span class="verb">POST</span></td><td>Envia texto.</td></tr>
+        <tr><td><code>/messages/media</code></td><td><span class="verb">POST</span></td><td>Envia mídia por upload, com o mimetype lido do próprio arquivo.</td></tr>
+        <tr><td><code>/messages/read</code></td><td><span class="verb">POST</span></td><td>Marca como lida.</td></tr>
+        <tr><td><code>/messages/reaction</code></td><td><span class="verb">POST</span></td><td>Reage a uma mensagem.</td></tr>
+        <tr><td><code>/contacts</code> · <code>/groups</code></td><td><span class="verb">GET</span></td><td>O que veio da sincronização, incluindo dados de grupo e foto de perfil.</td></tr>
+        <tr><td><code>/health</code> · <code>/metrics</code></td><td><span class="verb">GET</span></td><td>Health check e métricas para o monitoramento.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Detalhes que doem</p>
+    <h2>Três coisas que só aparecem em produção</h2>
+    <p class="say">
+      Nenhuma delas é visível num teste com um número só. As três estão no código porque apareceram
+      com tráfego real.
+    </p>
+    <div class="traps">
+      <div class="trap">
+        <h3>LID → PN</h3>
+        <p>O WhatsApp passou a entregar identificadores <code>@lid</code> em vez do número em <code>@s.whatsapp.net</code>.</p>
+        <p>O gateway resolve o LID para o número canônico antes de repassar — e, quando não consegue, loga e devolve o original em vez de inventar um contato novo.</p>
+      </div>
+      <div class="trap">
+        <h3>IDs monotônicos</h3>
+        <p>Evento de mensagem chega fora de ordem e sem chave estável entre instâncias.</p>
+        <p>Cada evento recebe um ID snowflake gerado no gateway, então ordenar e deduplicar do lado do CRM não depende de nada que venha de fora.</p>
+      </div>
+      <div class="trap">
+        <h3>Buffer na entrega</h3>
+        <p>Rajada de mensagens não pode virar rajada de POST no CRM.</p>
+        <p>Os eventos passam por um buffer antes de sair, e o webhook vai assinado com HMAC usando <code>CRM_WEBHOOK_SECRET</code> — quem recebe consegue provar a origem.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="kicker">Rodar</p>
+    <h2>Um Postgres e seis variáveis</h2>
+    <p class="say">
+      A sessão de cada instância vive no banco, não em disco local — por isso o container pode ser
+      recriado sem pedir QR de novo.
+    </p>
+<pre>PORT=8080
+API_KEY=<span class="c">sua-chave</span>
+DATABASE_URL=postgres://postgres:postgres@localhost:5432/whatsmeow?sslmode=disable
+CRM_WEBHOOK_URL=<span class="k">https://sirius.roilabs.com.br/api/webhooks/whatsmeow</span>
+CRM_WEBHOOK_SECRET=<span class="c">segredo-do-hmac</span>
+LOG_LEVEL=info
+
+<span class="c"># subir</span>
+docker compose up -d</pre>
+    <a class="cta" href="https://github.com/JeanZorzetti/whatsmeow-gateway">Ler o código no GitHub</a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>whatsmeow-gateway · infraestrutura da <a href="https://roilabs.com.br">ROI Labs</a></span>
+    <span><a href="https://github.com/JeanZorzetti/whatsmeow-gateway">github.com/JeanZorzetti/whatsmeow-gateway</a></span>
+  </div>
+</footer>
+
+<script>
+// Assinatura: o rack de instâncias. Estados reais do ciclo de vida, um sobe enquanto os outros trabalham.
+(function () {
+  var rows = document.getElementById("rows");
+  var tally = document.getElementById("tally");
+  if (!rows) return;
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var insts = [
+    { id: "inst_7f2a", num: "+55 62 9····-4471", state: "online",        n: 1284 },
+    { id: "inst_a913", num: "+55 62 9····-2038", state: "online",        n: 902 },
+    { id: "inst_c05e", num: "+55 11 9····-7712", state: "sincronizando", n: 61 },
+    { id: "inst_2b8d", num: "não pareada",       state: "qr",            n: 0 }
+  ];
+
+  var order = ["qr", "conectando", "sincronizando", "online"];
+  var delivered = 0;
+
+  insts.forEach(function (it) {
+    var el = document.createElement("div");
+    el.className = "inst";
+    el.innerHTML =
+      '<span class="id"></span>' +
+      '<span class="st"></span>' +
+      '<span class="wire"><i></i></span>' +
+      '<span class="cnt">×<b>0</b></span>';
+    el.querySelector(".id").innerHTML = '<u></u>';
+    el.querySelector(".id").insertBefore(document.createTextNode(it.id), el.querySelector(".id u"));
+    el.querySelector(".id u").textContent = it.num;
+    rows.appendChild(el);
+    it.el = el;
+    paint(it);
+  });
+
+  function paint(it) {
+    var st = it.el.querySelector(".st");
+    st.dataset.s = it.state;
+    st.textContent = it.state;
+    it.el.dataset.idle = it.state === "online" || it.state === "sincronizando" ? "0" : "1";
+    it.el.querySelector(".cnt b").textContent = it.n;
+  }
+
+  function tick() {
+    insts.forEach(function (it) {
+      if (it.state === "online") {
+        it.n += 1 + Math.floor(Math.random() * 3);
+        delivered += 1;
+      } else if (it.state === "sincronizando") {
+        it.n += 7;
+      }
+      paint(it);
+    });
+    tally.textContent = "eventos entregues: " + delivered;
+  }
+
+  // A instância nova percorre o ciclo de vida inteiro e recomeça.
+  var step = 0;
+  function pair() {
+    var last = insts[insts.length - 1];
+    step = (step + 1) % (order.length + 2);
+    last.state = order[Math.min(step, order.length - 1)];
+    if (step >= order.length + 1) { last.state = "qr"; last.n = 0; step = 0; }
+    if (last.state === "online" && last.n === 0) last.n = 3;
+    paint(last);
+  }
+
+  if (reduce) { tick(); return; }
+  setInterval(tick, 1600);
+  setInterval(pair, 3200);
+})();
+</script>
+</body>
+</html>
